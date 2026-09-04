@@ -99,6 +99,18 @@ sized exactly to your screen (via KDE's `screenGeometry()` scripting API,
 or `xrandr` on XFCE). Otherwise the photo is shown singly, letting the
 desktop's own wallpaper fill mode handle scaling.
 
+## Known issues
+
+- **`libayatana-appindicator is deprecated (please use
+  libayatana-appindicator-glib in newly written code)`** — you may see this
+  printed when starting the tray icon by hand. It's emitted by the system's
+  `libayatana-appindicator` C library itself, the moment `pystray` loads its
+  `AyatanaAppIndicator3` GObject-Introspection binding — not by anything in
+  this project. `pystray` doesn't yet support the newer
+  `libayatana-appindicator-glib`, which also has no widely-packaged
+  Python/GI binding yet, so there's nothing to switch to. Harmless; the
+  tray icon works normally.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
