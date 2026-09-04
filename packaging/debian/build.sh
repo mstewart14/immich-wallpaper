@@ -10,11 +10,14 @@ BUILD_DIR="$(mktemp -d)"
 PKG_DIR="$BUILD_DIR/immich-wallpaper_${VERSION}_all"
 
 mkdir -p "$PKG_DIR/DEBIAN" "$PKG_DIR/usr/share/immich-wallpaper/assets" \
-         "$PKG_DIR/usr/bin" "$PKG_DIR/etc/xdg/autostart"
+         "$PKG_DIR/usr/bin" "$PKG_DIR/etc/xdg/autostart" \
+         "$PKG_DIR/usr/share/icons/hicolor/256x256/apps"
 
 cp "$REPO_ROOT/config_ui.py" "$REPO_ROOT/index.html" "$REPO_ROOT/rotate.py" "$REPO_ROOT/tray_app.py" \
    "$PKG_DIR/usr/share/immich-wallpaper/"
-cp "$REPO_ROOT/assets/immich-flower.png" "$PKG_DIR/usr/share/immich-wallpaper/assets/"
+cp "$REPO_ROOT/assets/immich-flower.png" "$REPO_ROOT/assets/app-icon.png" \
+   "$PKG_DIR/usr/share/immich-wallpaper/assets/"
+cp "$REPO_ROOT/assets/app-icon.png" "$PKG_DIR/usr/share/icons/hicolor/256x256/apps/immich-wallpaper.png"
 
 declare -A entry_points=([tray]=tray_app.py [config]=config_ui.py [rotate]=rotate.py)
 for name in "${!entry_points[@]}"; do
@@ -31,7 +34,7 @@ Type=Application
 Name=Immich Wallpaper Tray
 Comment=Status icon and controls for the Immich wallpaper rotator
 Exec=immich-wallpaper-tray
-Icon=preferences-desktop-wallpaper
+Icon=immich-wallpaper
 Terminal=false
 Categories=Utility;
 X-GNOME-Autostart-enabled=true
