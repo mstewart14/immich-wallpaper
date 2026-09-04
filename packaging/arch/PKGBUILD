@@ -1,13 +1,9 @@
 # Maintainer: mstewart14 <46582721+mstewart14@users.noreply.github.com>
 #
-# NOTE: python-pystray is not in the official Arch repos as of this
-# writing -- it's only available via the AUR. You'll need an AUR helper
-# (yay, paru, ...) for `makepkg -si` to resolve it automatically, or build
-# and install python-pystray from the AUR yourself first. The other
-# package names below (libayatana-appindicator, python-gobject) are the
-# official `extra` repo names at time of writing but this PKGBUILD has
-# only been built/tested on Debian/Ubuntu so far -- if a name has changed,
-# `pacman -Ss <topic>` will find the current one.
+# NOTE: all deps below (python-pystray included) are now in the official
+# `extra` repo, so plain `makepkg -si` resolves everything -- no AUR
+# helper needed. Verified building/installing on Manjaro. If a package
+# name has changed since, `pacman -Ss <topic>` will find the current one.
 pkgname=immich-wallpaper
 pkgver=1.0.3
 pkgrel=1

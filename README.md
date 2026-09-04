@@ -54,9 +54,9 @@ cd packaging/arch
 makepkg -si
 ```
 
-`python-pystray` isn't in the official repos — this `PKGBUILD` pulls it
-from the AUR as a dependency, so you'll need an AUR helper (`yay`, `paru`,
-...) or to build `python-pystray` from the AUR yourself first.
+All dependencies (`python-pystray` included) are in the official `extra`
+repo, so plain `makepkg -si` resolves everything — no AUR helper needed.
+Verified building/installing on Manjaro.
 
 ### Manual / from source
 
