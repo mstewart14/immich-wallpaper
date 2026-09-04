@@ -58,6 +58,10 @@
   .save-bar { position: sticky; bottom: 0; background: var(--bg); padding-top: .75rem; }
   .hint { color: var(--muted); font-size: .85rem; margin-top: .35rem; }
   .filter { width: 100%; margin-bottom: .5rem; }
+  .radio-row { display: flex; flex-direction: column; gap: .5rem; margin-top: .4rem; }
+  .radio-opt { display: flex; align-items: flex-start; gap: .5rem; font-weight: 400; cursor: pointer; }
+  .radio-opt input { margin-top: .2rem; flex-shrink: 0; }
+  .radio-opt span { font-size: .88rem; }
 </style>
 </head>
 <body>
@@ -104,6 +108,18 @@
     <input class="filter" type="text" id="person-filter" placeholder="Filter people…">
     <div id="person-list" class="list empty">Test the connection above, then click Load.</div>
     <div class="actions"><button class="secondary" id="btn-load-people">Load people</button></div>
+
+    <label style="margin-top:1rem">When multiple people are selected</label>
+    <div class="radio-row">
+      <label class="radio-opt">
+        <input type="radio" name="person-match" value="any" checked>
+        <span><strong>Any</strong> of them (OR) — a photo just needs to contain at least one of the selected people</span>
+      </label>
+      <label class="radio-opt">
+        <input type="radio" name="person-match" value="all">
+        <span><strong>All</strong> of them (AND) — a photo must contain every selected person together</span>
+      </label>
+    </div>
   </section>
 
   <section class="card">
@@ -228,12 +244,14 @@ $('person-filter').addEventListener('input', (e) => {
 
 $('btn-save').addEventListener('click', async () => {
   const el = $('save-status');
+  const personMatch = document.querySelector('input[name="person-match"]:checked').value;
   const body = {
     ...creds(),
     interval_minutes: parseInt($('interval').value, 10) || 5,
     keep_count: parseInt($('keep').value, 10) || 2,
     albums: [...selectedAlbums.values()],
     people: [...selectedPeople.values()],
+    person_match: personMatch,
   };
   const r = await api('/api/save', body);
   if (r.ok) setStatus(el, true, 'Saved.');
@@ -252,6 +270,8 @@ $('btn-save').addEventListener('click', async () => {
   for (const p of (cfg.people || [])) selectedPeople.set(p.id, p);
   if (cfg.albums && cfg.albums.length) { lastAlbums = cfg.albums; renderList($('album-list'), lastAlbums, selectedAlbums, 'album'); }
   if (cfg.people && cfg.people.length) { lastPeople = cfg.people; renderList($('person-list'), lastPeople, selectedPeople, 'person'); }
+  const matchRadio = document.querySelector(`input[name="person-match"][value="${cfg.person_match || 'any'}"]`);
+  if (matchRadio) matchRadio.checked = true;
 })();
 </script>
 </body>

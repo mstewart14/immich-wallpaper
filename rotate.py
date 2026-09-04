@@ -165,14 +165,24 @@ def immich_get_bytes(base_url, api_key, path):
 
 def pick_image_batch(cfg, size=12):
     """One /search/random call, filtered by album/person selections, asking
-    for exif so orientation can be judged without downloading anything."""
+    for exif so orientation can be judged without downloading anything.
+
+    Immich's personIds filter is an AND (asset must contain every listed
+    person). When person_match is "any" (the default) and more than one
+    person is selected, we instead pick a single random person from the
+    list for this call -- each rotation ends up filtered to just one of
+    them, so over many rotations you get an OR across the whole group
+    rather than only photos containing all of them at once."""
     body = {"size": size, "withExif": True}
     album_ids = [a["id"] for a in cfg.get("albums", [])]
-    person_ids = [p["id"] for p in cfg.get("people", [])]
+    people = cfg.get("people", [])
     if album_ids:
         body["albumIds"] = album_ids
-    if person_ids:
-        body["personIds"] = person_ids
+    if people:
+        if cfg.get("person_match", "any") == "any" and len(people) > 1:
+            body["personIds"] = [random.choice(people)["id"]]
+        else:
+            body["personIds"] = [p["id"] for p in people]
 
     assets = immich_post(cfg["immich_url"], cfg["api_key"], "/search/random", body)
     if not assets:

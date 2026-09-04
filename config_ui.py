@@ -34,6 +34,7 @@ DEFAULT_CONFIG = {
     "keep_count": 2,
     "albums": [],
     "people": [],
+    "person_match": "any",
 }
 
 
@@ -246,6 +247,8 @@ class Handler(BaseHTTPRequestHandler):
         for key in ("albums", "people"):
             if key in body and isinstance(body[key], list):
                 cfg[key] = body[key]
+        if body.get("person_match") in ("any", "all"):
+            cfg["person_match"] = body["person_match"]
         save_config(cfg)
         self._send_json({"ok": True})
 
