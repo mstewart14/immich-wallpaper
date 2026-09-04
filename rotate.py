@@ -232,28 +232,27 @@ def _load_oriented(data):
     return img.convert("RGB")
 
 
-def _cover_resize(img, target_w, target_h):
+def _contain_resize(img, target_w, target_h):
+    """Scales to fit entirely within target_w x target_h, no cropping --
+    the caller's canvas shows through as letterbox bars around it."""
     from PIL import Image
-    src_ratio = img.width / img.height
-    dst_ratio = target_w / target_h
-    if src_ratio > dst_ratio:
-        new_h = target_h
-        new_w = max(1, round(new_h * src_ratio))
-    else:
-        new_w = target_w
-        new_h = max(1, round(new_w / src_ratio))
-    resized = img.resize((new_w, new_h), Image.LANCZOS)
-    left = (new_w - target_w) // 2
-    top = (new_h - target_h) // 2
-    return resized.crop((left, top, left + target_w, top + target_h))
+    scale = min(target_w / img.width, target_h / img.height)
+    new_w, new_h = max(1, round(img.width * scale)), max(1, round(img.height * scale))
+    return img.resize((new_w, new_h), Image.LANCZOS)
 
 
 def compose_pair(data_a, data_b, target_w, target_h, gap=6, bg=(0, 0, 0)):
     from PIL import Image
     canvas = Image.new("RGB", (target_w, target_h), bg)
     half_w = (target_w - gap) // 2
-    canvas.paste(_cover_resize(_load_oriented(data_a), half_w, target_h), (0, 0))
-    canvas.paste(_cover_resize(_load_oriented(data_b), target_w - gap - half_w, target_h), (half_w + gap, 0))
+    right_w = target_w - gap - half_w
+
+    left_img = _contain_resize(_load_oriented(data_a), half_w, target_h)
+    canvas.paste(left_img, ((half_w - left_img.width) // 2, (target_h - left_img.height) // 2))
+
+    right_img = _contain_resize(_load_oriented(data_b), right_w, target_h)
+    right_x = half_w + gap + (right_w - right_img.width) // 2
+    canvas.paste(right_img, (right_x, (target_h - right_img.height) // 2))
     return canvas
 
 
@@ -405,6 +404,7 @@ for (i = 0; i < allDesktops.length; i++) {{
     d.wallpaperPlugin = "org.kde.image";
     d.currentConfigGroup = Array("Wallpaper", "org.kde.image", "General");
     d.writeConfig("Image", "file://{image_path}");
+    d.writeConfig("FillMode", 1);
 }}
 '''
     result = _kde_eval(script)
@@ -437,6 +437,13 @@ def set_wallpaper_xfce(image_path):
         if r.returncode != 0:
             log(f"Failed to set {prop}: {r.stderr.strip()}")
             ok = False
+        # image-style 4 = "Scaled": fit the whole image, letterboxed, no crop
+        # (5 = "Zoomed" crops to fill, which is what was clipping portraits)
+        style_prop = prop[: -len("last-image")] + "image-style"
+        subprocess.run(
+            ["xfconf-query", "-c", "xfce4-desktop", "-p", style_prop, "-s", "4"],
+            capture_output=True, text=True,
+        )
     subprocess.run(["xfdesktop", "--reload"], capture_output=True, text=True)
     return ok
 
