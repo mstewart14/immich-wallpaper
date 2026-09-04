@@ -42,8 +42,9 @@ sudo apt install ./immich-wallpaper_<version>_all.deb
 
 (or build it yourself — see `packaging/debian/build.sh`)
 
-This pulls in `python3-pystray`, `python3-pil`, `python3-gi`, and
-`gir1.2-ayatanaappindicator3-0.1` automatically, installs the app under
+This pulls in `python3-pystray`, `python3-pil`, `python3-gi`,
+`gir1.2-ayatanaappindicator3-0.1`, and `x11-xserver-utils` (for `xrandr`,
+needed on XFCE) automatically, installs the app under
 `/usr/share/immich-wallpaper/`, and registers `/etc/xdg/autostart` so the
 tray icon starts on login for any user.
 
@@ -54,17 +55,18 @@ cd packaging/arch
 makepkg -si
 ```
 
-All dependencies (`python-pystray` included) are in the official `extra`
-repo, so plain `makepkg -si` resolves everything — no AUR helper needed.
-Verified building/installing on Manjaro.
+All dependencies (`python-pystray` and `xorg-xrandr`, needed on XFCE,
+included) are in the official `extra` repo, so plain `makepkg -si`
+resolves everything — no AUR helper needed. Verified building/installing
+on Manjaro.
 
 ### Manual / from source
 
-Needs Python 3.8+, Pillow, pystray, PyGObject, and an AppIndicator
-provider. On Debian/Ubuntu:
+Needs Python 3.8+, Pillow, pystray, PyGObject, an AppIndicator provider,
+and (on XFCE) `xrandr`. On Debian/Ubuntu:
 
 ```
-sudo apt install python3-pystray python3-pil python3-gi gir1.2-ayatanaappindicator3-0.1
+sudo apt install python3-pystray python3-pil python3-gi gir1.2-ayatanaappindicator3-0.1 x11-xserver-utils
 python3 tray_app.py
 ```
 

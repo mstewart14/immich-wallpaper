@@ -46,7 +46,7 @@ Section: utils
 Priority: optional
 Architecture: all
 Installed-Size: $INSTALLED_SIZE
-Depends: python3 (>= 3.8), python3-pil, python3-pystray, python3-gi, gir1.2-ayatanaappindicator3-0.1
+Depends: python3 (>= 3.8), python3-pil, python3-pystray, python3-gi, gir1.2-ayatanaappindicator3-0.1, x11-xserver-utils
 Recommends: kdialog | zenity
 Maintainer: mstewart14 <46582721+mstewart14@users.noreply.github.com>
 Homepage: https://github.com/mstewart14/immich-wallpaper

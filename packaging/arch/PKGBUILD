@@ -6,15 +6,14 @@
 # name has changed since, `pacman -Ss <topic>` will find the current one.
 pkgname=immich-wallpaper
 pkgver=1.0.3
-pkgrel=1
+pkgrel=2
 pkgdesc="Rotate desktop wallpaper from a self-hosted Immich library, with a tray icon for status and controls"
 arch=('any')
 url="https://github.com/mstewart14/immich-wallpaper"
 license=('MIT')
-depends=('python' 'python-pillow' 'python-gobject' 'libayatana-appindicator' 'python-pystray')
+depends=('python' 'python-pillow' 'python-gobject' 'libayatana-appindicator' 'python-pystray' 'xorg-xrandr')
 optdepends=('kdialog: save-a-copy dialog on KDE Plasma'
-            'zenity: save-a-copy dialog on GTK-based desktops (e.g. XFCE)'
-            'xorg-xrandr: screen-size detection for portrait photo pairing on XFCE')
+            'zenity: save-a-copy dialog on GTK-based desktops (e.g. XFCE)')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/mstewart14/immich-wallpaper/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('9110ffb50af11814560902a38db180ab7d1229815b2d7c10e768b375932eb584')
 
