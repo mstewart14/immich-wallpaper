@@ -9,7 +9,7 @@
 # only been built/tested on Debian/Ubuntu so far -- if a name has changed,
 # `pacman -Ss <topic>` will find the current one.
 pkgname=immich-wallpaper
-pkgver=1.0.0
+pkgver=1.0.1
 pkgrel=1
 pkgdesc="Rotate desktop wallpaper from a self-hosted Immich library, with a tray icon for status and controls"
 arch=('any')
@@ -20,7 +20,7 @@ optdepends=('kdialog: save-a-copy dialog on KDE Plasma'
             'zenity: save-a-copy dialog on GTK-based desktops (e.g. XFCE)'
             'xorg-xrandr: screen-size detection for portrait photo pairing on XFCE')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/mstewart14/immich-wallpaper/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('6ddfbe2e4ab929dfddab4038de4b0346c85a3a200756e054a5240152eae33ef5')
+sha256sums=('8b6f06483319bb742983504f66de71c1edbfad7c05431916cdaf7e9438d16dd9')
 
 package() {
   cd "$srcdir/$pkgname-$pkgver"
