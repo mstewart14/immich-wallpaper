@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Immich Wallpaper Setup</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f7; --fg: #1c1c1e; --card: #ffffff; --border: #d8d8dc;
+    --accent: #2f6fed; --muted: #6b6b70; --ok: #1a7f37; --err: #c62828;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #17181a; --fg: #ececee; --card: #222325; --border: #3a3b3e; --muted: #9a9a9e; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 2rem 1rem 4rem;
+  }
+  main { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+  .sub { color: var(--muted); margin-top: 0; margin-bottom: 1.5rem; }
+  section.card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 1.25rem; margin-bottom: 1.25rem;
+  }
+  h2 { font-size: 1rem; margin: 0 0 .75rem; }
+  label { display: block; font-weight: 600; margin: .75rem 0 .25rem; }
+  label:first-of-type { margin-top: 0; }
+  input[type=text], input[type=password], input[type=number] {
+    width: 100%; padding: .5rem .6rem; border-radius: 6px; border: 1px solid var(--border);
+    background: transparent; color: var(--fg); font-size: .95rem;
+  }
+  .row { display: flex; gap: 1rem; }
+  .row > div { flex: 1; }
+  button {
+    background: var(--accent); color: #fff; border: none; border-radius: 6px;
+    padding: .5rem 1rem; font-size: .9rem; cursor: pointer; font-weight: 600;
+  }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .actions { display: flex; gap: .6rem; margin-top: 1rem; flex-wrap: wrap; }
+  details { margin-top: .75rem; font-size: .88rem; color: var(--muted); }
+  details summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+  code { background: rgba(127,127,127,.15); padding: .1rem .35rem; border-radius: 4px; }
+  .scopes { margin: .5rem 0 0; padding-left: 1.1rem; }
+  .status { margin-top: .75rem; font-weight: 600; }
+  .status.ok { color: var(--ok); }
+  .status.err { color: var(--err); }
+  .list { max-height: 260px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: .5rem; margin-top: .5rem; }
+  .list.empty { display: flex; align-items: center; justify-content: center; color: var(--muted); min-height: 60px; }
+  .item { display: flex; align-items: center; gap: .6rem; padding: .3rem .2rem; }
+  .item img { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; background: var(--border); flex-shrink: 0; }
+  .item .name { flex: 1; }
+  .item .count { color: var(--muted); font-size: .8rem; }
+  .save-bar { position: sticky; bottom: 0; background: var(--bg); padding-top: .75rem; }
+  .hint { color: var(--muted); font-size: .85rem; margin-top: .35rem; }
+  .filter { width: 100%; margin-bottom: .5rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Immich Wallpaper Rotator</h1>
+  <p class="sub">Configure where photos come from and how the rotation behaves. This page only talks to your Immich server and to itself on localhost.</p>
+
+  <section class="card">
+    <h2>Immich server</h2>
+    <label for="url">Server URL</label>
+    <input type="text" id="url" placeholder="http://192.168.1.x:2283">
+
+    <label for="key">API key</label>
+    <input type="password" id="key" placeholder="paste API key">
+    <details open id="scope-help">
+      <summary>Which permissions should this key have?</summary>
+      <p style="margin:.5rem 0 0">In Immich, go to <strong>Account Settings &rarr; API Keys &rarr; New API Key</strong>, give it a name like <code>wallpaper-rotator</code>, and grant only these read/download scopes (uncheck everything else &mdash; especially anything with write/delete/admin):</p>
+      <ul class="scopes">
+        <li><code>asset.read</code> &mdash; see photo metadata</li>
+        <li><code>asset.download</code> &mdash; download the actual image bytes</li>
+        <li><code>album.read</code> &mdash; list albums to filter by</li>
+        <li><code>person.read</code> &mdash; list people (face groups) to filter by</li>
+      </ul>
+      <p class="hint">If your Immich version doesn't offer granular scopes, an all-permissions key also works &mdash; just keep it out of anything else and be ready to revoke it.</p>
+    </details>
+
+    <div class="actions">
+      <button id="btn-test">Test connection</button>
+    </div>
+    <div id="test-status" class="status"></div>
+  </section>
+
+  <section class="card">
+    <h2>Albums</h2>
+    <p class="hint">Pick albums to pull from. Leave all unchecked to pull from your whole library.</p>
+    <input class="filter" type="text" id="album-filter" placeholder="Filter albums…">
+    <div id="album-list" class="list empty">Test the connection above, then click Load.</div>
+    <div class="actions"><button class="secondary" id="btn-load-albums">Load albums</button></div>
+  </section>
+
+  <section class="card">
+    <h2>People</h2>
+    <p class="hint">Pick specific people (e.g. your kids) to pull from. Combined with album selections above using AND — leave unchecked to not filter by person.</p>
+    <input class="filter" type="text" id="person-filter" placeholder="Filter people…">
+    <div id="person-list" class="list empty">Test the connection above, then click Load.</div>
+    <div class="actions"><button class="secondary" id="btn-load-people">Load people</button></div>
+  </section>
+
+  <section class="card">
+    <h2>Rotation timing</h2>
+    <div class="row">
+      <div>
+        <label for="interval">Pull a new photo every (minutes)</label>
+        <input type="number" id="interval" min="1" value="5">
+      </div>
+      <div>
+        <label for="keep">Images to keep on disk</label>
+        <input type="number" id="keep" min="1" value="2">
+      </div>
+    </div>
+    <p class="hint">Only this many images ever sit on disk at once (oldest deleted as new ones arrive) &mdash; same idea as Wallhaven-style rotators, just backed by your own Immich library.</p>
+  </section>
+
+  <div class="save-bar">
+    <button id="btn-save" style="width:100%">Save configuration</button>
+    <div id="save-status" class="status"></div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let selectedAlbums = new Map();   // id -> {id,name}
+let selectedPeople = new Map();
+
+function creds() {
+  return { immich_url: $('url').value.trim(), api_key: $('key').value.trim() };
+}
+
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  return res.json();
+}
+
+function setStatus(el, ok, msg) {
+  el.textContent = msg;
+  el.className = 'status ' + (ok ? 'ok' : 'err');
+}
+
+$('btn-test').addEventListener('click', async () => {
+  const el = $('test-status');
+  el.textContent = 'Testing…'; el.className = 'status';
+  const c = creds();
+  if (!c.immich_url || !c.api_key) { setStatus(el, false, 'Enter a server URL and API key first.'); return; }
+  try {
+    const r = await api('/api/test', c);
+    if (r.ok) setStatus(el, true, `Connected — API key is valid (${r.album_count ?? '?'} album(s) visible).`);
+    else setStatus(el, false, r.error || 'Connection failed.');
+  } catch (e) { setStatus(el, false, 'Request failed: ' + e); }
+});
+
+function renderList(container, items, selectedMap, kind) {
+  container.classList.remove('empty');
+  if (!items.length) { container.classList.add('empty'); container.textContent = 'Nothing found.'; return; }
+  container.innerHTML = '';
+  for (const item of items) {
+    const row = document.createElement('label');
+    row.className = 'item';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = selectedMap.has(item.id);
+    cb.addEventListener('change', () => {
+      if (cb.checked) selectedMap.set(item.id, { id: item.id, name: item.name });
+      else selectedMap.delete(item.id);
+    });
+    row.appendChild(cb);
+    if (kind === 'person') {
+      const img = document.createElement('img');
+      img.loading = 'lazy';
+      img.src = `/api/person-thumb?person_id=${encodeURIComponent(item.id)}&immich_url=${encodeURIComponent(creds().immich_url)}&api_key=${encodeURIComponent(creds().api_key)}`;
+      row.appendChild(img);
+    }
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = item.name;
+    row.appendChild(name);
+    if (kind === 'album') {
+      const count = document.createElement('span');
+      count.className = 'count';
+      count.textContent = `${item.count} photos`;
+      row.appendChild(count);
+    }
+    container.appendChild(row);
+  }
+}
+
+let lastAlbums = [], lastPeople = [];
+
+$('btn-load-albums').addEventListener('click', async () => {
+  const el = $('album-list');
+  el.classList.remove('empty'); el.textContent = 'Loading…';
+  const r = await api('/api/albums', creds());
+  if (!r.ok) { el.textContent = ''; el.classList.add('empty'); setStatus($('test-status'), false, r.error || 'Failed to load albums.'); return; }
+  lastAlbums = r.albums;
+  renderList(el, lastAlbums, selectedAlbums, 'album');
+});
+
+$('btn-load-people').addEventListener('click', async () => {
+  const el = $('person-list');
+  el.classList.remove('empty'); el.textContent = 'Loading…';
+  const r = await api('/api/people', creds());
+  if (!r.ok) { el.textContent = ''; el.classList.add('empty'); setStatus($('test-status'), false, r.error || 'Failed to load people.'); return; }
+  lastPeople = r.people;
+  renderList(el, lastPeople, selectedPeople, 'person');
+});
+
+$('album-filter').addEventListener('input', (e) => {
+  const q = e.target.value.toLowerCase();
+  renderList($('album-list'), lastAlbums.filter(a => a.name.toLowerCase().includes(q)), selectedAlbums, 'album');
+});
+$('person-filter').addEventListener('input', (e) => {
+  const q = e.target.value.toLowerCase();
+  renderList($('person-list'), lastPeople.filter(p => p.name.toLowerCase().includes(q)), selectedPeople, 'person');
+});
+
+$('btn-save').addEventListener('click', async () => {
+  const el = $('save-status');
+  const body = {
+    ...creds(),
+    interval_minutes: parseInt($('interval').value, 10) || 5,
+    keep_count: parseInt($('keep').value, 10) || 2,
+    albums: [...selectedAlbums.values()],
+    people: [...selectedPeople.values()],
+  };
+  const r = await api('/api/save', body);
+  if (r.ok) setStatus(el, true, 'Saved.');
+  else setStatus(el, false, r.error || 'Save failed.');
+});
+
+// Load existing config on page open
+(async () => {
+  const res = await fetch('/api/config');
+  const cfg = await res.json();
+  $('url').value = cfg.immich_url || '';
+  $('key').value = cfg.api_key || '';
+  $('interval').value = cfg.interval_minutes || 5;
+  $('keep').value = cfg.keep_count || 2;
+  for (const a of (cfg.albums || [])) selectedAlbums.set(a.id, a);
+  for (const p of (cfg.people || [])) selectedPeople.set(p.id, p);
+  if (cfg.albums && cfg.albums.length) { lastAlbums = cfg.albums; renderList($('album-list'), lastAlbums, selectedAlbums, 'album'); }
+  if (cfg.people && cfg.people.length) { lastPeople = cfg.people; renderList($('person-list'), lastPeople, selectedPeople, 'person'); }
+})();
+</script>
+</body>
+</html>

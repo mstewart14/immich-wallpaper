@@ -1,0 +1,58 @@
+# Maintainer: mstewart14 <46582721+mstewart14@users.noreply.github.com>
+#
+# NOTE: python-pystray is not in the official Arch repos as of this
+# writing -- it's only available via the AUR. You'll need an AUR helper
+# (yay, paru, ...) for `makepkg -si` to resolve it automatically, or build
+# and install python-pystray from the AUR yourself first. The other
+# package names below (libayatana-appindicator, python-gobject) are the
+# official `extra` repo names at time of writing but this PKGBUILD has
+# only been built/tested on Debian/Ubuntu so far -- if a name has changed,
+# `pacman -Ss <topic>` will find the current one.
+pkgname=immich-wallpaper
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Rotate desktop wallpaper from a self-hosted Immich library, with a tray icon for status and controls"
+arch=('any')
+url="https://github.com/mstewart14/immich-wallpaper"
+license=('MIT')
+depends=('python' 'python-pillow' 'python-gobject' 'libayatana-appindicator' 'python-pystray')
+optdepends=('kdialog: save-a-copy dialog on KDE Plasma'
+            'zenity: save-a-copy dialog on GTK-based desktops (e.g. XFCE)'
+            'xorg-xrandr: screen-size detection for portrait photo pairing on XFCE')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/mstewart14/immich-wallpaper/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+
+  install -Dm644 config_ui.py index.html rotate.py tray_app.py -t "$pkgdir/usr/share/immich-wallpaper/"
+  install -Dm644 assets/immich-flower.png -t "$pkgdir/usr/share/immich-wallpaper/assets/"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+  install -Dm755 /dev/stdin "$pkgdir/usr/bin/immich-wallpaper-tray" <<'EOF'
+#!/bin/sh
+exec python3 /usr/share/immich-wallpaper/tray_app.py "$@"
+EOF
+
+  install -Dm755 /dev/stdin "$pkgdir/usr/bin/immich-wallpaper-config" <<'EOF'
+#!/bin/sh
+exec python3 /usr/share/immich-wallpaper/config_ui.py "$@"
+EOF
+
+  install -Dm755 /dev/stdin "$pkgdir/usr/bin/immich-wallpaper-rotate" <<'EOF'
+#!/bin/sh
+exec python3 /usr/share/immich-wallpaper/rotate.py "$@"
+EOF
+
+  install -Dm644 /dev/stdin "$pkgdir/etc/xdg/autostart/immich-wallpaper-tray.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Immich Wallpaper Tray
+Comment=Status icon and controls for the Immich wallpaper rotator
+Exec=immich-wallpaper-tray
+Icon=preferences-desktop-wallpaper
+Terminal=false
+Categories=Utility;
+X-GNOME-Autostart-enabled=true
+EOF
+}
