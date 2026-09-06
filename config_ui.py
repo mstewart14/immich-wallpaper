@@ -14,6 +14,7 @@ Config is read/written at ~/.config/immich-wallpaper/config.json (mode 600).
 import json
 import os
 import stat
+import subprocess
 import sys
 import argparse
 import webbrowser
@@ -35,6 +36,8 @@ DEFAULT_CONFIG = {
     "albums": [],
     "people": [],
     "person_match": "any",
+    "show_photo_info": False,
+    "show_date_overlay": False,
 }
 
 
@@ -249,8 +252,21 @@ class Handler(BaseHTTPRequestHandler):
                 cfg[key] = body[key]
         if body.get("person_match") in ("any", "all", "both"):
             cfg["person_match"] = body["person_match"]
+        for key in ("show_photo_info", "show_date_overlay"):
+            if key in body:
+                cfg[key] = bool(body[key])
         save_config(cfg)
-        self._send_json({"ok": True})
+
+        applied = False
+        try:
+            r = subprocess.run(
+                [sys.executable, str(HERE / "rotate.py"), "--once"],
+                capture_output=True, text=True, timeout=90,
+            )
+            applied = r.returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        self._send_json({"ok": True, "applied": applied})
 
 
 def main():

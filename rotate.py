@@ -22,6 +22,7 @@ Usage:
     python3 rotate.py --resume
     python3 rotate.py --status
 """
+import functools
 import glob
 import json
 import os
@@ -33,6 +34,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -163,6 +165,24 @@ def immich_get_bytes(base_url, api_key, path):
         return resp.read(), resp.getheader("Content-Type")
 
 
+def immich_get_json(base_url, api_key, path):
+    url = base_url.rstrip("/") + "/api" + path
+    req = urllib.request.Request(url, headers={"x-api-key": api_key})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw = resp.read()
+        return json.loads(raw) if raw else None
+
+
+def get_asset_details(cfg, asset_id):
+    """Full asset record (exifInfo + people), used only for the on-image
+    caption -- /search/random's per-asset payload isn't reliably this
+    complete, so this is one extra small GET per chosen photo."""
+    try:
+        return immich_get_json(cfg["immich_url"], cfg["api_key"], f"/assets/{asset_id}")
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, KeyError):
+        return None
+
+
 def pick_image_batch(cfg, size=12):
     """One /search/random call, filtered by album/person selections, asking
     for exif so orientation can be judged without downloading anything.
@@ -254,6 +274,14 @@ def _contain_resize(img, target_w, target_h):
     return img.resize((new_w, new_h), Image.LANCZOS)
 
 
+def _letterbox_single(img, target_w, target_h, bg=(0, 0, 0)):
+    from PIL import Image
+    canvas = Image.new("RGB", (target_w, target_h), bg)
+    fitted = _contain_resize(img, target_w, target_h)
+    canvas.paste(fitted, ((target_w - fitted.width) // 2, (target_h - fitted.height) // 2))
+    return canvas
+
+
 def compose_pair(data_a, data_b, target_w, target_h, gap=6, bg=(0, 0, 0)):
     from PIL import Image
     canvas = Image.new("RGB", (target_w, target_h), bg)
@@ -269,17 +297,222 @@ def compose_pair(data_a, data_b, target_w, target_h, gap=6, bg=(0, 0, 0)):
     return canvas
 
 
+# --------------------------------------------------------------------------
+# On-image overlays: per-photo caption (date / location / people) and a
+# today's-date corner overlay -- both "faked" at compose time since this is
+# a static wallpaper, not a live web page like Immich Kiosk (which these
+# are modeled on). Off by default; baked into the JPEG at each rotation.
+# --------------------------------------------------------------------------
+_FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/liberation-fonts/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+]
+
+
+def _load_font(size):
+    from PIL import ImageFont
+    for path in _FONT_CANDIDATES:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except OSError:
+                continue
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()  # older Pillow: fixed small size
+
+
+def _draw_outlined_text(draw, xy, text, font, fill=(190, 190, 190), outline=(0, 0, 0)):
+    x, y = xy
+    for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)):
+        draw.text((x + dx, y + dy), text, font=font, fill=outline)
+    draw.text((x, y), text, font=font, fill=fill)
+
+
+def _format_taken_date(iso_str):
+    if not iso_str:
+        return None
+    try:
+        return datetime.fromisoformat(iso_str.replace("Z", "+00:00")).strftime("%b %-d, %Y")
+    except (ValueError, TypeError):
+        return None
+
+
+def photo_caption_lines(details):
+    """[people names, location, date taken] from a full asset record, top
+    to bottom, skipping whichever parts are missing. Empty list if there's
+    nothing to show."""
+    if not details:
+        return []
+    exif = details.get("exifInfo") or {}
+    lines = []
+    people = [p.get("name") for p in (details.get("people") or []) if p.get("name") and not p.get("isHidden")]
+    if people:
+        lines.append(", ".join(people))
+    location = ", ".join(x for x in (exif.get("city"), exif.get("state") or exif.get("country")) if x)
+    if location:
+        lines.append(location)
+    date = _format_taken_date(exif.get("dateTimeOriginal"))
+    if date:
+        lines.append(date)
+    return lines
+
+
+EDGE_MARGIN_INCHES = 0.5
+
+
+@functools.lru_cache(maxsize=1)
+def get_screen_dpi():
+    """Best-effort physical DPI via xrandr's per-monitor mm dimensions
+    (works via XWayland on a Wayland KDE session too). Falls back to the
+    common 96 DPI default if detection fails for any reason. Cached --
+    doesn't change within a single rotation, and each rotate.py invocation
+    is a fresh short-lived process anyway."""
+    try:
+        result = subprocess.run(["xrandr", "--query"], capture_output=True, text=True, timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return 96.0
+    if result.returncode != 0:
+        return 96.0
+    m = re.search(r"connected primary (\d+)x(\d+)\+\d+\+\d+.*?(\d+)mm x (\d+)mm", result.stdout) or \
+        re.search(r"connected (\d+)x(\d+)\+\d+\+\d+.*?(\d+)mm x (\d+)mm", result.stdout)
+    if not m:
+        return 96.0
+    px_w, px_h, mm_w, mm_h = (int(g) for g in m.groups())
+    if mm_w <= 0 or mm_h <= 0:
+        return 96.0
+    return ((px_w / (mm_w / 25.4)) + (px_h / (mm_h / 25.4))) / 2
+
+
+def edge_margin_px():
+    return round(get_screen_dpi() * EDGE_MARGIN_INCHES)
+
+
+def draw_caption(canvas, lines, region_x0, region_x1, region_bottom, corner="left", extra_x=0, extra_bottom=0):
+    """Draws caption `lines` bottom-anchored inside [region_x0, region_x1]
+    of `canvas` (a region rather than the whole canvas so pair captions
+    stay against their own half), right-aligned if corner == "right".
+    extra_x/extra_bottom pad past a detected taskbar/panel on top of the
+    base EDGE_MARGIN_INCHES -- see screen_insets()."""
+    if not lines:
+        return
+    from PIL import ImageDraw
+    draw = ImageDraw.Draw(canvas)
+    font_size = max(13, round(canvas.height * 0.022))
+    font = _load_font(font_size)
+    margin = edge_margin_px()
+    line_gap = max(2, font_size // 6)
+    measured = [draw.textbbox((0, 0), line, font=font) for line in lines]
+    total_h = sum(b[3] - b[1] for b in measured) + line_gap * (len(lines) - 1)
+    y = region_bottom - (margin + extra_bottom) - total_h
+    for line, bbox in zip(lines, measured):
+        w = bbox[2] - bbox[0]
+        x = (region_x1 - (margin + extra_x) - w) if corner == "right" else (region_x0 + margin + extra_x)
+        _draw_outlined_text(draw, (x, y), line, font)
+        y += (bbox[3] - bbox[1]) + line_gap
+
+
+def draw_date_overlay(canvas, extra_x=0, extra_top=0):
+    """Today's date, top-left. Baked in at rotation time -- see module note
+    above on why this isn't a live clock. extra_x/extra_top pad past a
+    detected taskbar/panel on top of the base EDGE_MARGIN_INCHES -- see
+    screen_insets()."""
+    from PIL import ImageDraw
+    draw = ImageDraw.Draw(canvas)
+    font_size = max(15, round(canvas.height * 0.026))
+    font = _load_font(font_size)
+    margin = edge_margin_px()
+    _draw_outlined_text(draw, (margin + extra_x, margin + extra_top), time.strftime("%A, %B %-d"), font)
+
+
+def get_work_area():
+    """Best-effort usable-desktop-area query via the EWMH _NET_WORKAREA root
+    window property -- works via XWayland even on a Wayland KDE session,
+    and natively under XFCE's X11. Returns (x, y, width, height) or None
+    if xprop is missing, fails, or the output doesn't parse."""
+    try:
+        result = subprocess.run(["xprop", "-root", "_NET_WORKAREA"],
+                                 capture_output=True, text=True, timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    m = re.search(r"=\s*(-?\d+),\s*(-?\d+),\s*(\d+),\s*(\d+)", result.stdout)
+    return tuple(int(g) for g in m.groups()) if m else None
+
+
+def screen_insets(screen_size):
+    """How many pixels on each screen edge are covered by a taskbar/panel,
+    derived from comparing the usable work area to the full screen size.
+    All-zero (today's flat-margin behaviour) if detection fails or looks
+    nonsensical -- e.g. a multi-monitor workarea union wider than this one
+    screen, which we'd rather ignore than risk a broken layout from."""
+    zero = {"left": 0, "top": 0, "right": 0, "bottom": 0}
+    if not screen_size:
+        return zero
+    work = get_work_area()
+    if not work:
+        return zero
+    wx, wy, ww, wh = work
+    sw, sh = screen_size
+    left, top = max(0, wx), max(0, wy)
+    right, bottom = max(0, sw - (wx + ww)), max(0, sh - (wy + wh))
+    if left > sw * 0.4 or right > sw * 0.4 or top > sh * 0.4 or bottom > sh * 0.4:
+        return zero
+    return {"left": left, "top": top, "right": right, "bottom": bottom}
+
+
 def build_wallpaper_entry(cfg, assets, screen_size):
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     stem = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"  # unique even across same-second calls
+    show_info = bool(cfg.get("show_photo_info"))
+    show_date = bool(cfg.get("show_date_overlay"))
+
     if len(assets) == 2 and screen_size:
+        insets = screen_insets(screen_size)
         data_a, _ = download_asset_bytes(cfg, assets[0])
         data_b, _ = download_asset_bytes(cfg, assets[1])
         canvas = compose_pair(data_a, data_b, *screen_size)
+        if show_info:
+            gap, half_w = 6, (screen_size[0] - 6) // 2
+            draw_caption(canvas, photo_caption_lines(get_asset_details(cfg, assets[0]["id"])),
+                         0, half_w, screen_size[1], corner="left",
+                         extra_x=insets["left"], extra_bottom=insets["bottom"])
+            draw_caption(canvas, photo_caption_lines(get_asset_details(cfg, assets[1]["id"])),
+                         half_w + gap, screen_size[0], screen_size[1], corner="right",
+                         extra_x=insets["right"], extra_bottom=insets["bottom"])
+        if show_date:
+            draw_date_overlay(canvas, extra_x=insets["left"], extra_top=insets["top"])
         path = IMAGES_DIR / f"{stem}.jpg"
         canvas.save(path, "JPEG", quality=92)
         kind = "pair"
         chosen = assets
+    elif show_info or show_date:
+        asset = assets[0]
+        data, _ = download_asset_bytes(cfg, asset)
+        canvas = _load_oriented(data)
+        # Pre-letterbox onto the real screen size (when known) so the
+        # taskbar insets below -- measured in real screen pixels -- land in
+        # the same coordinate space as what's drawn here. Without this, a
+        # single image left at its own native resolution has no reliable
+        # correspondence to on-screen pixel positions.
+        if screen_size:
+            canvas = _letterbox_single(canvas, *screen_size)
+        insets = screen_insets(screen_size)
+        if show_info:
+            draw_caption(canvas, photo_caption_lines(get_asset_details(cfg, asset["id"])),
+                         0, canvas.width, canvas.height, corner="left",
+                         extra_x=insets["left"], extra_bottom=insets["bottom"])
+        if show_date:
+            draw_date_overlay(canvas, extra_x=insets["left"], extra_top=insets["top"])
+        path = IMAGES_DIR / f"{stem}.jpg"
+        canvas.save(path, "JPEG", quality=92)
+        kind = "single"
+        chosen = [asset]
     else:
         asset = assets[0]
         data, ctype = download_asset_bytes(cfg, asset)

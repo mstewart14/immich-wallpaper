@@ -29,6 +29,15 @@ API for a random photo on each rotation and keeps a small rolling window
 - **Desktop support**: KDE Plasma (via D-Bus scripting — no QtWebEngine
   involved) and XFCE (via `xfconf-query`/`xrandr`). Desktop is
   auto-detected at runtime.
+- **On-image overlays** (optional, off by default) — inspired by
+  [Immich Kiosk](https://github.com/damongolding/immich-kiosk): a discreet
+  caption per photo (people names, location, date taken, stacked top to
+  bottom) and/or today's date in the corner. Baked into the image at each
+  rotation rather than rendered live, since this is a static wallpaper, not
+  a web page. Margins automatically clear any taskbar/panel the desktop
+  reports via the `_NET_WORKAREA` X11 property (works through XWayland on
+  Wayland KDE sessions too), on top of a base 0.5" edge margin computed
+  from the display's real DPI.
 - No syncing, no local mirror of your library — everything is fetched
   on-demand from Immich's REST API.
 

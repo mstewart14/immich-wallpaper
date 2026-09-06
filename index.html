@@ -141,6 +141,21 @@
     <p class="hint">Only this many images ever sit on disk at once (oldest deleted as new ones arrive) &mdash; same idea as Wallhaven-style rotators, just backed by your own Immich library.</p>
   </section>
 
+  <section class="card">
+    <h2>Display</h2>
+    <div class="radio-row">
+      <label class="radio-opt">
+        <input type="checkbox" id="show-photo-info">
+        <span>Show photo info (date taken, location, people) in a corner of each image</span>
+      </label>
+      <label class="radio-opt">
+        <input type="checkbox" id="show-date-overlay">
+        <span>Show today's date in the top-left corner</span>
+      </label>
+    </div>
+    <p class="hint">Inspired by Immich Kiosk's overlays. Baked into the image at each rotation (this is a static wallpaper, not a live page), so the date updates whenever a new photo rotates in, not by the second.</p>
+  </section>
+
   <div class="save-bar">
     <button id="btn-save" style="width:100%">Save configuration</button>
     <div id="save-status" class="status"></div>
@@ -256,9 +271,12 @@ $('btn-save').addEventListener('click', async () => {
     albums: [...selectedAlbums.values()],
     people: [...selectedPeople.values()],
     person_match: personMatch,
+    show_photo_info: $('show-photo-info').checked,
+    show_date_overlay: $('show-date-overlay').checked,
   };
+  el.textContent = 'Saving…'; el.className = 'status';
   const r = await api('/api/save', body);
-  if (r.ok) setStatus(el, true, 'Saved.');
+  if (r.ok) setStatus(el, true, r.applied ? 'Saved and applied.' : 'Saved (wallpaper refresh failed — check the tray icon for the error).');
   else setStatus(el, false, r.error || 'Save failed.');
 });
 
@@ -276,6 +294,8 @@ $('btn-save').addEventListener('click', async () => {
   if (cfg.people && cfg.people.length) { lastPeople = cfg.people; renderList($('person-list'), lastPeople, selectedPeople, 'person'); }
   const matchRadio = document.querySelector(`input[name="person-match"][value="${cfg.person_match || 'any'}"]`);
   if (matchRadio) matchRadio.checked = true;
+  $('show-photo-info').checked = !!cfg.show_photo_info;
+  $('show-date-overlay').checked = !!cfg.show_date_overlay;
 })();
 </script>
 </body>
