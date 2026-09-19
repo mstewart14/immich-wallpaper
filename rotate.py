@@ -436,7 +436,7 @@ def _load_font(size: int):
     """
     from PIL import ImageFont
     for path in _FONT_CANDIDATES:
-        if os.path.exists(path):
+        if Path(path).exists():
             try:
                 return ImageFont.truetype(path, size)
             except OSError:
@@ -659,8 +659,8 @@ def _save_original_file(
     extension = Path(asset.get("originalFileName") or "").suffix.lower()
     if not SAFE_EXTENSION.fullmatch(extension):
         extension = EXT_BY_MIME.get(
-            asset.get("originalMimeType"),
-            EXT_BY_MIME.get(content_type, ".jpg"))
+            asset.get("originalMimeType") or "",
+            EXT_BY_MIME.get(content_type or "", ".jpg"))
     path = settings.IMAGES_DIR / f"{stem}{extension}"
     with settings.open_private(path, exclusive=True) as handle:
         handle.write(data)
@@ -685,25 +685,23 @@ def build_wallpaper_entry(
     show_info = bool(config.get("show_photo_info"))
     show_date = bool(config.get("show_date_overlay"))
 
-    original = None
+    jpeg_path = settings.IMAGES_DIR / f"{stem}.jpg"
     if len(assets) == 2 and screen_size:
         kind, chosen = "pair", assets
-        canvas = _compose_pair_wallpaper(
-            config, assets, screen_size, show_info, show_date)
+        path = _save_jpeg(_compose_pair_wallpaper(
+            config, assets, screen_size, show_info, show_date), jpeg_path)
     else:
         kind, chosen = "single", [assets[0]]
         # Downloaded once: the original bytes are kept for the fallback.
-        original = download_asset_bytes(config, assets[0])
+        data, content_type = download_asset_bytes(config, assets[0])
         canvas = None
         if screen_size or show_info or show_date:
             canvas = _compose_single(
-                original[0], config, assets[0], screen_size,
-                show_info, show_date)
-
-    if canvas is None:
-        path = _save_original_file(assets[0], *original, stem)
-    else:
-        path = _save_jpeg(canvas, settings.IMAGES_DIR / f"{stem}.jpg")
+                data, config, assets[0], screen_size, show_info, show_date)
+        if canvas is None:
+            path = _save_original_file(assets[0], data, content_type, stem)
+        else:
+            path = _save_jpeg(canvas, jpeg_path)
 
     return {
         "kind": kind,
@@ -732,6 +730,16 @@ def _caching_downloader(config: dict):
     return download
 
 
+def _with_aspects(assets: list[dict]) -> list[tuple[dict, float]]:
+    """The assets whose shape is known, each with its aspect ratio."""
+    pairs = []
+    for asset in assets:
+        aspect = asset_aspect(asset)
+        if aspect:
+            pairs.append((asset, aspect))
+    return pairs
+
+
 def _pick_for_screen(
     batch: list[dict], monitor: desktops.Monitor, max_photos: int,
 ) -> tuple[list[dict], list[layout.Placement] | None]:
@@ -750,13 +758,13 @@ def _pick_for_screen(
     if max_photos == 2:
         assets = choose_from_batch(batch, allow_pair=True)
         if len(assets) == 2:
-            aspects = [asset_aspect(asset) for asset in assets]
-            if None in aspects or len(layout.plan_row(
-                    aspects, *size, max_photos=2)) < 2:
+            pair = _with_aspects(assets)
+            if len(pair) < 2 or len(layout.plan_row(
+                    [aspect for _, aspect in pair], *size,
+                    max_photos=2)) < 2:
                 assets = assets[:1]
         return assets, None
-    known = [(asset, asset_aspect(asset)) for asset in batch]
-    known = [(asset, aspect) for asset, aspect in known if aspect]
+    known = _with_aspects(batch)
     if not known or known[0][0] is not batch[0]:
         return [batch[0]], None    # seed's shape unknown: show it alone
     aspects = [aspect for _, aspect in known]
@@ -813,8 +821,7 @@ def _render_span(
     slice. Returns ({monitor name: image}, the photos used).
     """
     strip = screens.strip_layout(monitors)
-    known = [(asset, asset_aspect(asset)) for asset in batch]
-    known = [(asset, aspect) for asset, aspect in known if aspect]
+    known = _with_aspects(batch)
     if not known:
         raise ValueError("no photos with known dimensions to span")
     placements = layout.plan_row(
@@ -838,8 +845,7 @@ def _render_span(
 
 
 def _save_screen_image(
-    canvas, config: dict, assets: list[dict], download, stem: str,
-    name: str,
+    canvas, assets: list[dict], download, stem: str, name: str,
 ) -> Path:
     """Write one screen's image and return its path.
 
@@ -895,7 +901,7 @@ def build_multi_entry(
         remember(chosen)
         for name, canvas in slices.items():
             files[name] = _save_screen_image(
-                canvas, config, chosen, download, stem, name)
+                canvas, chosen, download, stem, name)
     else:
         remaining = list(batch)
         for monitor in monitors:
@@ -907,7 +913,7 @@ def build_multi_entry(
                 config, assets, placements, monitor, download, show_info,
                 show_date and monitor is primary)
             files[monitor.name] = _save_screen_image(
-                canvas, config, assets, download, stem, monitor.name)
+                canvas, assets, download, stem, monitor.name)
             remember(assets)
             remaining = [a for a in remaining
                          if all(a["id"] != b["id"] for b in assets)]
@@ -980,6 +986,21 @@ def _config_value(config: dict, key: str) -> Any:
     return config.get(key, settings.DEFAULT_CONFIG[key])
 
 
+def _screen_options(config: dict) -> tuple[int, str]:
+    """(most photos per screen, multi-monitor mode) from the config.
+
+    Invalid values fall back to the defaults instead of failing a rotation.
+    """
+    try:
+        max_photos = max(1, min(
+            MAX_PHOTOS_PER_SCREEN_LIMIT,
+            int(_config_value(config, "max_photos_per_screen"))))
+    except (TypeError, ValueError):
+        max_photos = settings.DEFAULT_CONFIG["max_photos_per_screen"]
+    mode = _config_value(config, "multi_monitor_mode")
+    return max_photos, mode if mode in MULTI_MONITOR_MODES else "same"
+
+
 def _build_rotation_entry(
     config: dict, state: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -991,15 +1012,7 @@ def _build_rotation_entry(
     mode. Returns None, after recording the failure, if anything went
     wrong.
     """
-    try:
-        max_photos = max(1, min(
-            MAX_PHOTOS_PER_SCREEN_LIMIT,
-            int(_config_value(config, "max_photos_per_screen"))))
-    except (TypeError, ValueError):
-        max_photos = settings.DEFAULT_CONFIG["max_photos_per_screen"]
-    mode = _config_value(config, "multi_monitor_mode")
-    if mode not in MULTI_MONITOR_MODES:
-        mode = "same"
+    max_photos, mode = _screen_options(config)
     monitors = desktops.get_monitors()
     per_monitor = len(monitors) > 1 and desktops.supports_monitor_wallpapers()
     use_multi = per_monitor or (bool(monitors) and max_photos > 2)
@@ -1028,7 +1041,10 @@ def _build_rotation_entry(
             assets = choose_assets_for_rotation(
                 config, allow_pair=bool(screen_size) and max_photos >= 2)
     except urllib.error.HTTPError as error:
-        body = error.read().decode(errors="replace")[:200]
+        # Fall back to the reason phrase when the server sent no body (a
+        # proxy's bare 403, or one of our own refused redirects).
+        body = (error.read().decode(errors="replace")[:200]
+                or str(error.reason))
         _record_failure(
             state, f"Immich request failed: HTTP {error.code} {body}",
             details=_http_error_details(error))

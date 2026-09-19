@@ -124,7 +124,7 @@ def save_config(config: dict[str, Any]) -> None:
 # `history` runs oldest -> newest; each entry has kind, path, assets[],
 # size_bytes and created_at. `position` is the index into `history` that is
 # currently applied to the desktop (-1 when there is no history yet).
-DEFAULT_STATE = {
+DEFAULT_STATE: dict[str, Any] = {
     "last_run": 0,
     "last_success": None,
     "last_error": None,

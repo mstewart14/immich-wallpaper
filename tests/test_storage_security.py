@@ -150,7 +150,7 @@ class UntrustedNamesAndIdsTests(unittest.TestCase):
     def test_asset_ids_cannot_change_the_request_path(self):
         seen = []
 
-        def capture(url, key, path, **kwargs):
+        def capture(_url, _key, path, **_kwargs):
             seen.append(path)
             return b"", None
 

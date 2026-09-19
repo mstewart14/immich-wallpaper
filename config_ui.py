@@ -43,7 +43,7 @@ import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 import settings
@@ -112,7 +112,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- access control -----------------------------------------------
     def _own_hosts(self) -> set[str]:
-        port = self.server.server_address[1]
+        address = cast("tuple[str, int]", self.server.server_address)
+        port = address[1]
         return {f"127.0.0.1:{port}", f"localhost:{port}"}
 
     def _request_is_local(self) -> bool:

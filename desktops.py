@@ -7,13 +7,12 @@ DesktopBackend for it; nothing else in the project needs to change.
 from __future__ import annotations
 
 import functools
-import glob
 import json
 import logging
 import os
 import re
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -84,10 +83,10 @@ class Monitor:
     primary: bool = False
 
 
-# One line of `xrandr --listmonitors`, e.g.
-#   " 0: +*HDMI-A-1 2560/597x1440/336+0+0  HDMI-A-1"
-# after the index come optional flags ('+' automatic, '*' primary), the
-# monitor name, then width/mm x height/mm and signed x and y offsets.
+# One line of `xrandr --listmonitors` looks like: index, a colon, optional
+# flags ('+' automatic, '*' primary), the monitor name, then width/mm x
+# height/mm, then signed x and y offsets (for example a primary 2560x1440
+# monitor at the origin, named HDMI-A-1).
 _XRANDR_MONITOR_LINE = re.compile(
     r"^\s*\d+:\s+([+*]*)(\S+)\s+(\d+)/\d+x(\d+)/\d+([+-]\d+)([+-]\d+)")
 
@@ -143,7 +142,10 @@ def get_work_area() -> tuple[int, int, int, int] | None:
         return None
     match = re.search(r"=\s*(-?\d+),\s*(-?\d+),\s*(\d+),\s*(\d+)",
                       result.stdout)
-    return tuple(int(group) for group in match.groups()) if match else None
+    if not match:
+        return None
+    x, y, width, height = (int(group) for group in match.groups())
+    return x, y, width, height
 
 
 def screen_insets(screen_size: tuple[int, int] | None) -> dict[str, int]:
@@ -187,8 +189,8 @@ def ensure_dbus_env() -> None:
     if "DBUS_SESSION_BUS_ADDRESS" not in os.environ:
         runtime_dir = os.environ.get(
             "XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-        bus_path = f"{runtime_dir}/bus"
-        if os.path.exists(bus_path):
+        bus_path = Path(runtime_dir) / "bus"
+        if bus_path.exists():
             os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus_path}"
 
 
@@ -196,10 +198,10 @@ def ensure_display_env() -> None:
     """Point DISPLAY at the first X11 socket if unset (see ensure_dbus_env)."""
     if "DISPLAY" not in os.environ:
         # S108: this is the X server's own well-known socket directory.
-        sockets = sorted(glob.glob("/tmp/.X11-unix/X*"))  # noqa: S108
+        socket_dir = Path("/tmp/.X11-unix")  # noqa: S108
+        sockets = sorted(socket_dir.glob("X*"))
         if sockets:
-            display_number = os.path.basename(sockets[0])[1:]
-            os.environ["DISPLAY"] = ":" + display_number
+            os.environ["DISPLAY"] = ":" + sockets[0].name[1:]
 
 
 # --------------------------------------------------------------------------
@@ -226,7 +228,7 @@ def get_screen_size_kde() -> tuple[int, int] | None:
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
-def set_monitor_wallpapers_kde(images: dict[str, Path | str]) -> bool:
+def set_monitor_wallpapers_kde(images: Mapping[str, Path | str]) -> bool:
     """Set a wallpaper per monitor, leaving other monitors untouched.
 
     `images` maps a monitor's connector name to its image. Each name is
@@ -427,7 +429,7 @@ def set_wallpaper_xfce(image_path: Path | str) -> bool:
     return _xfce_apply({name: image_path for name in image_properties})
 
 
-def set_monitor_wallpapers_xfce(images: dict[str, Path | str]) -> bool:
+def set_monitor_wallpapers_xfce(images: Mapping[str, Path | str]) -> bool:
     """Set a wallpaper per monitor, leaving other monitors untouched.
 
     `images` maps a monitor's connector name to its image. XFCE keeps one
@@ -488,9 +490,10 @@ class DesktopBackend:
     xdg_names: tuple[str, ...]
     process: str | None
     screen_size: Callable[[], tuple[int, int] | None]
-    set_wallpaper: Callable[[Path], bool]
+    set_wallpaper: Callable[[Path | str], bool]
     monitors: Callable[[], list[Monitor]] = get_monitors_xrandr
-    set_monitor_wallpapers: Callable[[dict[str, Path]], bool] | None = None
+    set_monitor_wallpapers: (
+        Callable[[Mapping[str, Path | str]], bool] | None) = None
 
 
 # Order matters: earlier entries win when several would match.
@@ -556,7 +559,7 @@ def supports_monitor_wallpapers() -> bool:
     return bool(backend and backend.set_monitor_wallpapers)
 
 
-def set_monitor_wallpapers(images: dict[str, Path]) -> bool:
+def set_monitor_wallpapers(images: Mapping[str, Path | str]) -> bool:
     """Set a wallpaper per monitor, leaving other monitors untouched.
 
     `images` maps connector names to image paths. Returns True only if

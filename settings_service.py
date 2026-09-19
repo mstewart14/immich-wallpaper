@@ -54,15 +54,13 @@ def _clean_selection(items: Any) -> list[dict[str, str]]:
     """Reduce chosen albums or people to their id and name."""
     if not isinstance(items, list):
         raise SettingsError("albums and people must be lists")
-    cleaned = []
-    for item in items[:MAX_SELECTED_ITEMS]:
+    return [
+        {"id": item["id"][:MAX_TEXT_LENGTH],
+         "name": str(item.get("name") or "")[:MAX_TEXT_LENGTH]}
+        for item in items[:MAX_SELECTED_ITEMS]
         if (isinstance(item, dict) and isinstance(item.get("id"), str)
-                and item["id"]):
-            cleaned.append({
-                "id": item["id"][:MAX_TEXT_LENGTH],
-                "name": str(item.get("name") or "")[:MAX_TEXT_LENGTH],
-            })
-    return cleaned
+            and item["id"])
+    ]
 
 
 def _clean_monitor_names(names: Any) -> list[str]:
