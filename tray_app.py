@@ -211,6 +211,11 @@ def back_enabled(item=None) -> bool:
     return settings.can_go_back()
 
 
+def forward_enabled(item=None) -> bool:
+    """Whether the "Forward" action currently has anywhere to go."""
+    return settings.can_go_forward()
+
+
 def _open_url_action(url: str | None):
     """Build a menu action that opens `url` in the browser."""
     def action(icon, item):
@@ -343,15 +348,12 @@ def action_back(icon, item) -> None:
 
 
 def action_forward(icon, item) -> None:
-    """Menu action: step forward, or fetch a new photo at the newest."""
-    if settings.can_go_forward():
-        rotate.navigate(1)
+    """Menu action: step forward to the next wallpaper in the history.
+
+    Only enabled when there is one; fetching a new photo is "Refresh now".
+    """
+    if rotate.navigate(1):
         refresh_icon(icon)
-    else:
-        # Already at the newest -- "Forward" past the edge just fetches a
-        # fresh photo instead of doing nothing.
-        threading.Thread(
-            target=_refresh_worker, args=(icon,), daemon=True).start()
 
 
 def _settings_worker() -> None:
@@ -387,7 +389,8 @@ def build_menu():
         pystray.MenuItem(image_text, None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("◀ Back", action_back, enabled=back_enabled),
-        pystray.MenuItem("Forward ▶", action_forward),
+        pystray.MenuItem("Forward ▶", action_forward,
+                         enabled=forward_enabled),
         pystray.MenuItem("View in browser", pystray.Menu(view_links_items),
                          enabled=has_current_image),
         pystray.MenuItem("Save a copy...", action_save_copy,
