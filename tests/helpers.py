@@ -1,6 +1,7 @@
 """Shared test helpers: small local HTTP servers."""
 from __future__ import annotations
 
+import contextlib
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
@@ -31,7 +32,9 @@ def serve(
                     (self.command, self.path, dict(self.headers.items())))
             length = int(self.headers.get("Content-Length") or 0)
             self.body = self.rfile.read(length) if length else b""
-            handler(self)
+            # The client may give up mid-reply (e.g. it hit a size limit).
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                handler(self)
 
         do_GET = do_POST = _dispatch  # noqa: N815 (http.server's names)
 

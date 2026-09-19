@@ -19,6 +19,8 @@ CACHE_DIR = Path.home() / ".cache" / APP_NAME
 IMAGES_DIR = CACHE_DIR / "images"
 STATE_PATH = CACHE_DIR / "state.json"
 LOG_PATH = CACHE_DIR / "rotate.log"
+# Random access token of the running settings page; see config_ui.py.
+UI_TOKEN_PATH = CACHE_DIR / "ui-token"
 
 # Port the config UI listens on by default; the tray probes it to decide
 # whether to reuse a running UI or start a new one.

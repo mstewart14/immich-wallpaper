@@ -200,6 +200,12 @@ def post_json(
 def get_bytes(
     base_url: str, api_key: str | None, path: str,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    max_bytes: int | None = None,
 ) -> tuple[bytes, str | None]:
-    """GET `path`; return (body bytes, Content-Type header)."""
-    return _open(base_url, api_key, path, timeout, MAX_DOWNLOAD_BYTES)
+    """GET `path`; return (body bytes, Content-Type header).
+
+    `max_bytes` lowers the size ceiling for callers that expect small
+    replies (a thumbnail); the default is MAX_DOWNLOAD_BYTES.
+    """
+    limit = MAX_DOWNLOAD_BYTES if max_bytes is None else max_bytes
+    return _open(base_url, api_key, path, timeout, limit)
