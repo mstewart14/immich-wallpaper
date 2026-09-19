@@ -35,6 +35,15 @@ DEFAULT_CONFIG = {
     "person_match": "any",
     "show_photo_info": False,
     "show_date_overlay": False,
+    # With more than one monitor: "same" (one photo everywhere, each screen
+    # drawn at its own size), "different" (each screen its own photos) or
+    # "span" (one mosaic across the monitors).
+    "multi_monitor_mode": "same",
+    # Connector names of the monitors to change; empty means all of them.
+    "monitors": [],
+    # Most photos on one screen. 1 never pairs; 2 pairs portraits (today's
+    # behaviour); more fills a wide screen with several portraits.
+    "max_photos_per_screen": 2,
 }
 
 

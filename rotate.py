@@ -44,6 +44,7 @@ from typing import Any
 import desktops
 import immich_api
 import layout
+import screens
 import settings
 
 logger = logging.getLogger(__name__)
@@ -68,8 +69,20 @@ LOG_BACKUP_COUNT = 1
 # Longest response-header value written to the log.
 LOG_HEADER_VALUE_LIMIT = 120
 
-# How many candidates one /search/random call asks Immich for.
+# How many candidates one /search/random call asks Immich for, and how many
+# more to ask for per extra monitor (so each screen has fresh photos to use).
 RANDOM_BATCH_SIZE = 12
+EXTRA_BATCH_PER_MONITOR = 6
+MAX_BATCH_SIZE = 30
+
+MULTI_MONITOR_MODES = ("same", "different", "span")
+# Most photos allowed on one screen, and across a spanned desktop.
+MAX_PHOTOS_PER_SCREEN_LIMIT = 6
+SPAN_MAX_PHOTOS = 6
+# Multi-monitor images don't try to keep clear of a taskbar: the desktop
+# only reports one work area for all screens, so there is nothing reliable
+# to measure per monitor. The base edge margin still applies.
+_NO_INSETS = {"left": 0, "top": 0, "right": 0, "bottom": 0}
 
 # Pixel gap between the two photos of a side-by-side portrait pair.
 PAIR_GAP_PX = 6
@@ -238,6 +251,21 @@ def classify_orientation(asset: dict) -> str:
     return "square"
 
 
+def choose_from_batch(batch: list[dict], allow_pair: bool) -> list[dict]:
+    """Pick the asset(s) to show from an already shuffled, non-empty batch.
+
+    Two portraits when `allow_pair` and the seed (the first asset) is a
+    portrait with another portrait available, otherwise just the seed.
+    """
+    first = batch[0]
+    if allow_pair and classify_orientation(first) == "portrait":
+        for candidate in batch[1:]:
+            if (candidate["id"] != first["id"]
+                    and classify_orientation(candidate) == "portrait"):
+                return [first, candidate]
+    return [first]
+
+
 def choose_assets_for_rotation(config: dict, allow_pair: bool) -> list[dict]:
     """Pick the asset(s) for one rotation.
 
@@ -249,13 +277,7 @@ def choose_assets_for_rotation(config: dict, allow_pair: bool) -> list[dict]:
     if not batch:
         return []
     random.shuffle(batch)
-    first = batch[0]
-    if allow_pair and classify_orientation(first) == "portrait":
-        for candidate in batch[1:]:
-            if (candidate["id"] != first["id"]
-                    and classify_orientation(candidate) == "portrait"):
-                return [first, candidate]
-    return [first]
+    return choose_from_batch(batch, allow_pair)
 
 
 def download_asset_bytes(
@@ -529,12 +551,21 @@ def _draw_photo_caption(
 
 def _compose_pair_wallpaper(
     config: dict, assets: list[dict], screen_size: tuple[int, int],
-    show_info: bool, show_date: bool,
+    show_info: bool, show_date: bool, download=None,
+    insets: dict[str, int] | None = None,
 ):
-    """Side-by-side canvas for two portrait assets, with optional overlays."""
-    insets = desktops.screen_insets(screen_size)
-    data_left, _ = download_asset_bytes(config, assets[0])
-    data_right, _ = download_asset_bytes(config, assets[1])
+    """Side-by-side canvas for two portrait assets, with optional overlays.
+
+    `download` fetches an asset's bytes (shared and cached when several
+    screens use the same photos); `insets` overrides taskbar detection.
+    """
+    if insets is None:
+        insets = desktops.screen_insets(screen_size)
+    if download is None:
+        def download(asset):
+            return download_asset_bytes(config, asset)
+    data_left, _ = download(assets[0])
+    data_right, _ = download(assets[1])
     canvas = compose_pair(data_left, data_right, *screen_size)
     if show_info:
         screen_width = screen_size[0]
@@ -553,6 +584,7 @@ def _compose_pair_wallpaper(
 def _compose_single(
     data: bytes, config: dict, asset: dict,
     screen_size: tuple[int, int] | None, show_info: bool, show_date: bool,
+    insets: dict[str, int] | None = None,
 ):
     """Canvas for one photo: letterboxed to the screen, overlays drawn on.
 
@@ -568,7 +600,8 @@ def _compose_single(
         canvas = _load_oriented(data)
         if screen_size:
             canvas = _letterbox_single(canvas, *screen_size)
-        insets = desktops.screen_insets(screen_size)
+        if insets is None:
+            insets = desktops.screen_insets(screen_size)
         if show_info:
             _draw_photo_caption(canvas, config, asset, 0, canvas.width,
                                 "left", insets)
@@ -644,6 +677,222 @@ def build_wallpaper_entry(
     }
 
 
+# --------------------------------------------------------------------------
+# Multi-monitor wallpapers
+# --------------------------------------------------------------------------
+def _caching_downloader(config: dict):
+    """A download function that fetches each asset at most once.
+
+    Screens showing the same photo (the "same" mode) share one download.
+    """
+    cache: dict[str, tuple[bytes, str | None]] = {}
+
+    def download(asset: dict) -> tuple[bytes, str | None]:
+        if asset["id"] not in cache:
+            cache[asset["id"]] = download_asset_bytes(config, asset)
+        return cache[asset["id"]]
+
+    return download
+
+
+def _pick_for_screen(
+    batch: list[dict], monitor: desktops.Monitor, max_photos: int,
+) -> tuple[list[dict], list[layout.Placement] | None]:
+    """Choose the photos for one screen from a shuffled batch.
+
+    The first photo of the batch is the seed. Up to two photos use the
+    original rule (two portraits side by side), kept only where that makes
+    sense for this screen's shape, so a portrait monitor doesn't get two
+    portraits squeezed side by side. Allowing more than two switches to the
+    row layout, which fills the screen's width with as many portraits as
+    fit and returns the placements to draw them at.
+    """
+    if max_photos <= 1:
+        return [batch[0]], None
+    size = (monitor.width, monitor.height)
+    if max_photos == 2:
+        assets = choose_from_batch(batch, allow_pair=True)
+        if len(assets) == 2:
+            aspects = [asset_aspect(asset) for asset in assets]
+            if None in aspects or len(layout.plan_row(
+                    aspects, *size, max_photos=2)) < 2:
+                assets = assets[:1]
+        return assets, None
+    known = [(asset, asset_aspect(asset)) for asset in batch]
+    known = [(asset, aspect) for asset, aspect in known if aspect]
+    if not known or known[0][0] is not batch[0]:
+        return [batch[0]], None    # seed's shape unknown: show it alone
+    aspects = [aspect for _, aspect in known]
+    placements = layout.plan_row(
+        aspects, *size, max_photos=max_photos,
+        companion_ok=lambda i: aspects[i] < 1 / ASPECT_RATIO_TOLERANCE)
+    if len(placements) < 2:
+        return [batch[0]], None
+    remapped = [
+        layout.Placement(index, p.x, p.y, p.width, p.height)
+        for index, p in enumerate(placements)]
+    return [known[p.index][0] for p in placements], remapped
+
+
+def _render_screen(
+    config: dict, assets: list[dict],
+    placements: list[layout.Placement] | None, monitor: desktops.Monitor,
+    download, show_info: bool, show_date: bool,
+):
+    """Draw one screen's photos at that monitor's own size.
+
+    Returns the canvas, or None if a single photo can't be decoded (the
+    caller then keeps its original file).
+    """
+    size = (monitor.width, monitor.height)
+    if placements:
+        canvas = compose_row(
+            [download(asset)[0] for asset in assets], placements, *size)
+        for asset, place in zip(assets, placements):
+            if show_info:
+                _draw_photo_caption(canvas, config, asset, place.x,
+                                    place.x + place.width, "left", _NO_INSETS)
+        if show_date:
+            draw_date_overlay(canvas)
+        return canvas
+    if len(assets) == 2:
+        return _compose_pair_wallpaper(
+            config, assets, size, show_info, show_date, download=download,
+            insets=_NO_INSETS)
+    data, _ = download(assets[0])
+    return _compose_single(
+        data, config, assets[0], size, show_info, show_date,
+        insets=_NO_INSETS)
+
+
+def _render_span(
+    config: dict, batch: list[dict], monitors: list[desktops.Monitor],
+    download, show_info: bool, show_date: bool,
+) -> tuple[dict[str, Any], list[dict]]:
+    """One mosaic across all `monitors`, sliced into one image per monitor.
+
+    The monitors are laid side by side as a strip, filled with as many
+    photos as fit without cropping any, then each monitor takes its own
+    slice. Returns ({monitor name: image}, the photos used).
+    """
+    strip = screens.strip_layout(monitors)
+    known = [(asset, asset_aspect(asset)) for asset in batch]
+    known = [(asset, aspect) for asset, aspect in known if aspect]
+    if not known:
+        raise ValueError("no photos with known dimensions to span")
+    placements = layout.plan_row(
+        [aspect for _, aspect in known], strip.width, strip.height,
+        max_photos=SPAN_MAX_PHOTOS)
+    chosen = [known[place.index][0] for place in placements]
+    canvas = compose_row(
+        [download(asset)[0] for asset in chosen], placements,
+        strip.width, strip.height)
+    if show_info:
+        for asset, place in zip(chosen, placements):
+            _draw_photo_caption(canvas, config, asset, place.x,
+                                place.x + place.width, "left", _NO_INSETS)
+    if show_date:
+        draw_date_overlay(canvas, extra_x=strip.slots[0].x)
+    slices = {
+        slot.name: canvas.crop(
+            (slot.x, slot.y, slot.x + slot.width, slot.y + slot.height))
+        for slot in strip.slots}
+    return slices, chosen
+
+
+def _save_screen_image(
+    canvas, config: dict, assets: list[dict], download, stem: str,
+    name: str,
+) -> Path:
+    """Write one screen's image and return its path.
+
+    That is the drawn canvas or, when a single photo couldn't be decoded,
+    that photo's original file.
+    """
+    file_stem = f"{stem}-{screens.safe_name(name)}"
+    if canvas is None:
+        data, content_type = download(assets[0])
+        return _save_original_file(assets[0], data, content_type, file_stem)
+    path = settings.IMAGES_DIR / f"{file_stem}.jpg"
+    canvas.save(path, "JPEG", quality=JPEG_QUALITY)
+    return path
+
+
+def build_multi_entry(
+    config: dict, batch: list[dict], monitors: list[desktops.Monitor],
+    mode: str, *, per_monitor: bool, max_photos: int,
+) -> dict[str, Any]:
+    """Build a history entry with one image per target monitor.
+
+    Args:
+        config: The user's config.
+        batch: Shuffled candidate photos; the first is the seed.
+        monitors: The monitors to change, left to right.
+        mode: "same" (each screen shows the same seed photo, drawn at its
+            own size), "different" (each screen its own photos, none
+            shared) or "span" (one mosaic across all the monitors).
+        per_monitor: Whether the desktop sets monitors individually. If
+            not, the entry holds just its main image.
+        max_photos: Most photos on one screen (outside "span").
+
+    Returns:
+        The entry. Its main `path` is the primary monitor's image, and
+        `images` maps every monitor to its own file.
+    """
+    settings.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    stem = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    show_info = bool(config.get("show_photo_info"))
+    show_date = bool(config.get("show_date_overlay"))
+    download = _caching_downloader(config)
+    primary = next((m for m in monitors if m.primary), monitors[0])
+    several = len(monitors) > 1
+    files: dict[str, Path] = {}
+    used: list[dict] = []
+
+    def remember(assets: list[dict]) -> None:
+        for asset in assets:
+            if all(asset["id"] != other["id"] for other in used):
+                used.append(asset)
+
+    if mode == "span" and several:
+        slices, chosen = _render_span(
+            config, batch, monitors, download, show_info, show_date)
+        remember(chosen)
+        for name, canvas in slices.items():
+            files[name] = _save_screen_image(
+                canvas, config, chosen, download, stem, name)
+    else:
+        remaining = list(batch)
+        for monitor in monitors:
+            pool = batch
+            if mode == "different" and several:
+                pool = remaining or batch
+            assets, placements = _pick_for_screen(pool, monitor, max_photos)
+            canvas = _render_screen(
+                config, assets, placements, monitor, download, show_info,
+                show_date and monitor is primary)
+            files[monitor.name] = _save_screen_image(
+                canvas, config, assets, download, stem, monitor.name)
+            remember(assets)
+            remaining = [a for a in remaining
+                         if all(a["id"] != b["id"] for b in assets)]
+
+    if several or len(used) > 2:
+        kind = "multi"
+    else:
+        kind = "pair" if len(used) == 2 else "single"
+    entry: dict[str, Any] = {
+        "kind": kind,
+        "path": str(files[primary.name]),
+        "assets": [asset_meta(config, asset) for asset in used],
+        "size_bytes": sum(path.stat().st_size for path in files.values()),
+        "created_at": time.time(),
+    }
+    if per_monitor:
+        entry["images"] = {name: str(path) for name, path in files.items()}
+    return entry
+
+
 def append_history(
     state: dict[str, Any], entry: dict[str, Any], keep_count: int,
 ) -> bool:
@@ -691,6 +940,91 @@ def append_history(
 # --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
+def _config_value(config: dict, key: str) -> Any:
+    """A config value, falling back to the shared default when absent."""
+    return config.get(key, settings.DEFAULT_CONFIG[key])
+
+
+def _build_rotation_entry(
+    config: dict, state: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Fetch photos and build this rotation's history entry.
+
+    With one monitor (or a desktop that can't set monitors individually)
+    this is the ordinary single-image rotation. With several monitors it
+    builds one image per targeted monitor according to the configured
+    mode. Returns None, after recording the failure, if anything went
+    wrong.
+    """
+    try:
+        max_photos = max(1, min(
+            MAX_PHOTOS_PER_SCREEN_LIMIT,
+            int(_config_value(config, "max_photos_per_screen"))))
+    except (TypeError, ValueError):
+        max_photos = settings.DEFAULT_CONFIG["max_photos_per_screen"]
+    mode = _config_value(config, "multi_monitor_mode")
+    if mode not in MULTI_MONITOR_MODES:
+        mode = "same"
+    monitors = desktops.get_monitors()
+    per_monitor = len(monitors) > 1 and desktops.supports_monitor_wallpapers()
+    use_multi = per_monitor or (bool(monitors) and max_photos > 2)
+
+    targets: list[desktops.Monitor] = []
+    if use_multi:
+        targets = (monitors if len(monitors) == 1 else
+                   screens.select_monitors(
+                       monitors, _config_value(config, "monitors")))
+        if not targets:
+            wanted = ", ".join(_config_value(config, "monitors"))
+            _record_failure(
+                state, "None of the selected monitors is connected "
+                f"(looking for: {wanted}).")
+            return None
+
+    try:
+        if use_multi:
+            size = min(MAX_BATCH_SIZE, RANDOM_BATCH_SIZE
+                       + EXTRA_BATCH_PER_MONITOR * (len(targets) - 1))
+            batch = pick_image_batch(config, size=size)
+            random.shuffle(batch)
+            assets = batch
+        else:
+            screen_size = desktops.get_screen_size()
+            assets = choose_assets_for_rotation(
+                config, allow_pair=bool(screen_size) and max_photos >= 2)
+    except urllib.error.HTTPError as error:
+        body = error.read().decode(errors="replace")[:200]
+        _record_failure(
+            state, f"Immich request failed: HTTP {error.code} {body}",
+            details=_http_error_details(error))
+        return None
+    except urllib.error.URLError as error:
+        _record_failure(
+            state, f"Could not reach Immich server: {error.reason}")
+        return None
+
+    if not assets:
+        _record_failure(
+            state,
+            "No matching image assets returned (check album/person filters).")
+        return None
+
+    try:
+        if use_multi:
+            return build_multi_entry(
+                config, assets, targets, mode, per_monitor=per_monitor,
+                max_photos=max_photos)
+        return build_wallpaper_entry(config, assets, screen_size)
+    except Exception as error:  # noqa: BLE001
+        # Any download/decode/compose failure is recorded for the tray to
+        # show rather than crashing the periodic run.
+        details = (_http_error_details(error)
+                   if isinstance(error, urllib.error.HTTPError) else None)
+        _record_failure(
+            state, f"Download/compose failed: {error}", details=details)
+        return None
+
+
 def _configure_logging() -> None:
     """Send log output to stdout, and failures also to the log file.
 
@@ -789,37 +1123,8 @@ def main() -> None:
         return  # not due yet -- quiet no-op, caller polls often
 
     state["last_run"] = time.time()
-    screen_size = desktops.get_screen_size()
-
-    try:
-        assets = choose_assets_for_rotation(
-            config, allow_pair=bool(screen_size))
-    except urllib.error.HTTPError as error:
-        body = error.read().decode(errors="replace")[:200]
-        _record_failure(
-            state, f"Immich request failed: HTTP {error.code} {body}",
-            details=_http_error_details(error))
-        return
-    except urllib.error.URLError as error:
-        _record_failure(
-            state, f"Could not reach Immich server: {error.reason}")
-        return
-
-    if not assets:
-        _record_failure(
-            state,
-            "No matching image assets returned (check album/person filters).")
-        return
-
-    try:
-        entry = build_wallpaper_entry(config, assets, screen_size)
-    except Exception as error:  # noqa: BLE001
-        # Any download/decode/compose failure is recorded for the tray to
-        # show rather than crashing the periodic run.
-        details = (_http_error_details(error)
-                   if isinstance(error, urllib.error.HTTPError) else None)
-        _record_failure(
-            state, f"Download/compose failed: {error}", details=details)
+    entry = _build_rotation_entry(config, state)
+    if entry is None:
         return
 
     keep_count = max(
