@@ -1,7 +1,9 @@
 # Tooling configuration only -- this project is a set of scripts, not an
 # installable Python package (see packaging/ for the .deb and PKGBUILD).
 #
-# Lint with:  ruff check .
+# Lint with:        ruff check .
+# Type-check with:  mypy *.py
+# Test with:        python3 -m unittest discover -s tests -t .
 
 [tool.ruff]
 line-length = 79
@@ -24,3 +26,16 @@ select = [
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Test methods are named for what they check; docstrings on each add noise.
+"tests/*" = ["D1"]
+
+[tool.mypy]
+# The packaged minimum is Python 3.8, but mypy itself needs 3.10+ as its
+# target. Every module uses `from __future__ import annotations`, so the
+# type hints mean the same thing on 3.8.
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
