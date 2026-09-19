@@ -8,17 +8,19 @@ from __future__ import annotations
 
 import functools
 import glob
+import json
 import logging
 import os
 import re
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 FALLBACK_DPI = 96.0
+XRANDR_TIMEOUT_SECONDS = 5
 # A detected panel wider than this fraction of the screen is assumed to be
 # a bad measurement (e.g. a multi-monitor work area) and ignored.
 MAX_INSET_FRACTION = 0.4
@@ -57,6 +59,71 @@ def get_screen_dpi() -> float:
     horizontal_dpi = width_px / (width_mm / 25.4)
     vertical_dpi = height_px / (height_mm / 25.4)
     return (horizontal_dpi + vertical_dpi) / 2
+
+
+@dataclass(frozen=True)
+class Monitor:
+    """One physical display and where it sits on the shared desktop.
+
+    Attributes:
+        name: Connector name, e.g. "HDMI-A-1". Stable across sessions, so it
+            is what settings use to pick monitors.
+        x: Left edge, in the desktop's shared coordinate space.
+        y: Top edge, likewise (may be negative).
+        width: Width in pixels, as currently oriented (a monitor turned on
+            its side reports its rotated size).
+        height: Height in pixels.
+        primary: Whether the desktop treats it as the primary display.
+    """
+
+    name: str
+    x: int
+    y: int
+    width: int
+    height: int
+    primary: bool = False
+
+
+# One line of `xrandr --listmonitors`, e.g.
+#   " 0: +*HDMI-A-1 2560/597x1440/336+0+0  HDMI-A-1"
+# after the index come optional flags ('+' automatic, '*' primary), the
+# monitor name, then width/mm x height/mm and signed x and y offsets.
+_XRANDR_MONITOR_LINE = re.compile(
+    r"^\s*\d+:\s+([+*]*)(\S+)\s+(\d+)/\d+x(\d+)/\d+([+-]\d+)([+-]\d+)")
+
+
+def parse_xrandr_monitors(listing: str) -> list[Monitor]:
+    """Parse `xrandr --listmonitors` output into Monitors.
+
+    Lines that don't look like a monitor (the "Monitors: N" header, blanks)
+    are ignored. The result is ordered left to right, then top to bottom.
+    """
+    monitors = []
+    for line in listing.splitlines():
+        match = _XRANDR_MONITOR_LINE.match(line)
+        if match:
+            flags, name, width, height, x, y = match.groups()
+            monitors.append(Monitor(
+                name=name, x=int(x), y=int(y), width=int(width),
+                height=int(height), primary="*" in flags))
+    return sorted(monitors, key=lambda monitor: (monitor.x, monitor.y))
+
+
+def get_monitors_xrandr() -> list[Monitor]:
+    """All monitors via xrandr; empty if xrandr is unavailable or fails.
+
+    Works on X11 sessions and, through XWayland, on Wayland ones.
+    """
+    ensure_display_env()
+    try:
+        result = subprocess.run(
+            ["xrandr", "--listmonitors"], capture_output=True, text=True,
+            timeout=XRANDR_TIMEOUT_SECONDS)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+    if result.returncode != 0:
+        return []
+    return parse_xrandr_monitors(result.stdout)
 
 
 def get_work_area() -> tuple[int, int, int, int] | None:
@@ -156,6 +223,47 @@ def get_screen_size_kde() -> tuple[int, int] | None:
         return None
     match = re.search(r'string "(\d+)x(\d+)"', result.stdout)
     return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def get_monitors_kde() -> list[Monitor]:
+    """All monitors on KDE Plasma.
+
+    Connector names and the primary flag come from xrandr; each name is
+    then resolved to Plasma's own screen and its geometry is read from
+    Plasma, which is what wallpapers are laid out against. If xrandr gives
+    nothing, Plasma's screens are listed as "Screen 1", "Screen 2", ....
+    """
+    named = get_monitors_xrandr()
+    names = [monitor.name for monitor in named]
+    script = f'''
+function emit(label, g) {{
+    print("monitor|" + label + "|" + g.left + "|" + g.top + "|"
+          + g.width + "|" + g.height);
+}}
+var names = {json.dumps(names)};
+for (var i = 0; i < names.length; i++) {{
+    var screen = screenForConnector(names[i]);
+    if (screen >= 0) emit(names[i], screenGeometry(screen));
+}}
+if (names.length == 0) {{
+    for (var s = 0; s < screenCount; s++)
+        emit("Screen " + (s + 1), screenGeometry(s));
+}}
+'''
+    result = _run_plasma_script(script)
+    if result.returncode != 0:
+        return []
+    primary = {monitor.name for monitor in named if monitor.primary}
+    monitors = [
+        Monitor(name=name, x=int(x), y=int(y), width=int(width),
+                height=int(height), primary=name in primary)
+        for name, x, y, width, height in re.findall(
+            r"monitor\|([^|]+)\|(-?\d+)\|(-?\d+)\|(\d+)\|(\d+)",
+            result.stdout)
+    ]
+    if monitors and not any(monitor.primary for monitor in monitors):
+        monitors[0] = replace(monitors[0], primary=True)
+    return sorted(monitors, key=lambda monitor: (monitor.x, monitor.y))
 
 
 def set_wallpaper_kde(image_path: Path | str) -> bool:
@@ -274,6 +382,9 @@ class DesktopBackend:
             None if it can't be determined.
         set_wallpaper: Called with the image path; returns True on success,
             or False (after logging) on failure.
+        monitors: Called with no arguments; returns the connected Monitors
+            ordered left to right, or an empty list if they can't be
+            determined.
 
     """
 
@@ -282,13 +393,14 @@ class DesktopBackend:
     process: str | None
     screen_size: Callable[[], tuple[int, int] | None]
     set_wallpaper: Callable[[Path], bool]
+    monitors: Callable[[], list[Monitor]] = get_monitors_xrandr
 
 
 # Order matters: earlier entries win when several would match.
 BACKENDS = [
     DesktopBackend(
         "kde", ("kde",), "plasmashell",
-        get_screen_size_kde, set_wallpaper_kde),
+        get_screen_size_kde, set_wallpaper_kde, get_monitors_kde),
     DesktopBackend(
         "xfce", ("xfce",), "xfce4-session",
         get_screen_size_xfce, set_wallpaper_xfce),
@@ -328,6 +440,15 @@ def get_screen_size() -> tuple[int, int] | None:
     """Screen size as (width, height) on the detected desktop, or None."""
     backend = current_backend()
     return backend.screen_size() if backend else None
+
+
+def get_monitors() -> list[Monitor]:
+    """All monitors on the detected desktop, left to right.
+
+    Empty if the desktop is unsupported or the monitors can't be determined.
+    """
+    backend = current_backend()
+    return backend.monitors() if backend else []
 
 
 def set_wallpaper(image_path: Path | str) -> bool:
