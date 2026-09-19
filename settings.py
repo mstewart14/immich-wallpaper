@@ -19,6 +19,10 @@ CACHE_DIR = Path.home() / ".cache" / APP_NAME
 IMAGES_DIR = CACHE_DIR / "images"
 STATE_PATH = CACHE_DIR / "state.json"
 
+# Port the config UI listens on by default; the tray probes it to decide
+# whether to reuse a running UI or start a new one.
+CONFIG_UI_PORT = 8877
+
 DEFAULT_CONFIG = {
     "immich_url": "",
     "api_key": "",
