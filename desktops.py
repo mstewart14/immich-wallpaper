@@ -225,6 +225,48 @@ def get_screen_size_kde() -> tuple[int, int] | None:
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
+def set_monitor_wallpapers_kde(images: dict[str, Path | str]) -> bool:
+    """Set a wallpaper per monitor, leaving other monitors untouched.
+
+    `images` maps a monitor's connector name to its image. Each name is
+    resolved to Plasma's own screen, and only that screen's desktop is
+    changed. Returns True only if every named monitor was found and set.
+    """
+    uris = {name: f"file://{path}" for name, path in images.items()}
+    # Same plugin toggle as set_wallpaper_kde, which explains why it's needed.
+    script = f'''
+var images = {json.dumps(uris)};
+var allDesktops = desktops();
+var done = [];
+for (var name in images) {{
+    var screen = screenForConnector(name);
+    if (screen < 0) continue;
+    for (var i = 0; i < allDesktops.length; i++) {{
+        var d = allDesktops[i];
+        if (d.screen != screen) continue;
+        d.wallpaperPlugin = "org.kde.color";
+        d.wallpaperPlugin = "org.kde.image";
+        d.currentConfigGroup = Array("Wallpaper", "org.kde.image", "General");
+        d.writeConfig("Image", images[name]);
+        d.writeConfig("FillMode", 1);
+        done.push(name);
+    }}
+}}
+print("applied|" + done.join("|") + "|end");
+'''
+    result = _run_plasma_script(script)
+    if result.returncode != 0:
+        logger.error("KDE wallpaper set failed: %s", result.stderr.strip())
+        return False
+    match = re.search(r"applied\|(.*?)\|?end", result.stdout)
+    applied = set(filter(None, match.group(1).split("|"))) if match else set()
+    missing = [name for name in images if name not in applied]
+    if missing:
+        logger.error("KDE has no screen for monitor(s): %s",
+                     ", ".join(missing))
+    return not missing
+
+
 def get_monitors_kde() -> list[Monitor]:
     """All monitors on KDE Plasma.
 
@@ -315,11 +357,11 @@ def get_screen_size_xfce() -> tuple[int, int] | None:
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
-def set_wallpaper_xfce(image_path: Path | str) -> bool:
-    """Set `image_path` as the wallpaper on every XFCE monitor/workspace.
+def _xfce_image_properties() -> list[str] | None:
+    """List every xfce4-desktop `last-image` property.
 
-    Returns True if every property was set; logs and returns False on
-    failure.
+    There is one per monitor and workspace. Returns None (after logging) if
+    they can't be listed.
     """
     ensure_dbus_env()
     ensure_display_env()
@@ -329,7 +371,7 @@ def set_wallpaper_xfce(image_path: Path | str) -> bool:
     if list_result.returncode != 0:
         logger.error("xfconf-query -l failed: %s",
                      list_result.stderr.strip())
-        return False
+        return None
     image_properties = [
         name for name in list_result.stdout.splitlines()
         if name.endswith("last-image")
@@ -337,9 +379,17 @@ def set_wallpaper_xfce(image_path: Path | str) -> bool:
     if not image_properties:
         logger.error("No xfce4-desktop 'last-image' properties found "
                      "(no monitors configured yet?).")
-        return False
+        return None
+    return image_properties
+
+
+def _xfce_apply(assignments: dict[str, Path | str]) -> bool:
+    """Set each `last-image` property to its image, scaled, then reload.
+
+    Returns True if every property was set; failures are logged.
+    """
     all_set = True
-    for image_property in image_properties:
+    for image_property, image_path in assignments.items():
         result = subprocess.run(
             ["xfconf-query", "-c", "xfce4-desktop", "-p", image_property,
              "-s", str(image_path)],
@@ -360,6 +410,45 @@ def set_wallpaper_xfce(image_path: Path | str) -> bool:
         )
     subprocess.run(["xfdesktop", "--reload"], capture_output=True, text=True)
     return all_set
+
+
+def set_wallpaper_xfce(image_path: Path | str) -> bool:
+    """Set `image_path` as the wallpaper on every XFCE monitor/workspace.
+
+    Returns True if every property was set; logs and returns False on
+    failure.
+    """
+    image_properties = _xfce_image_properties()
+    if image_properties is None:
+        return False
+    return _xfce_apply({name: image_path for name in image_properties})
+
+
+def set_monitor_wallpapers_xfce(images: dict[str, Path | str]) -> bool:
+    """Set a wallpaper per monitor, leaving other monitors untouched.
+
+    `images` maps a monitor's connector name to its image. XFCE keeps one
+    setting per monitor, named `monitor<connector>`. Returns True only if
+    every named monitor was found and set.
+    """
+    image_properties = _xfce_image_properties()
+    if image_properties is None:
+        return False
+    assignments: dict[str, Path | str] = {}
+    missing = []
+    for name, image_path in images.items():
+        matches = [prop for prop in image_properties
+                   if f"/monitor{name}/" in prop]
+        if not matches:
+            missing.append(name)
+        for prop in matches:
+            assignments[prop] = image_path
+    if missing:
+        logger.error("No xfce4-desktop settings for monitor(s): %s",
+                     ", ".join(missing))
+    if not assignments:
+        return False
+    return _xfce_apply(assignments) and not missing
 
 
 # --------------------------------------------------------------------------
@@ -385,6 +474,10 @@ class DesktopBackend:
         monitors: Called with no arguments; returns the connected Monitors
             ordered left to right, or an empty list if they can't be
             determined.
+        set_monitor_wallpapers: Optional. Called with a dict of monitor
+            connector name -> image path; sets each named monitor and
+            leaves the others alone. Returns True only if all were set.
+            None if the desktop can't set monitors individually.
 
     """
 
@@ -394,16 +487,19 @@ class DesktopBackend:
     screen_size: Callable[[], tuple[int, int] | None]
     set_wallpaper: Callable[[Path], bool]
     monitors: Callable[[], list[Monitor]] = get_monitors_xrandr
+    set_monitor_wallpapers: Callable[[dict[str, Path]], bool] | None = None
 
 
 # Order matters: earlier entries win when several would match.
 BACKENDS = [
     DesktopBackend(
         "kde", ("kde",), "plasmashell",
-        get_screen_size_kde, set_wallpaper_kde, get_monitors_kde),
+        get_screen_size_kde, set_wallpaper_kde, get_monitors_kde,
+        set_monitor_wallpapers_kde),
     DesktopBackend(
         "xfce", ("xfce",), "xfce4-session",
-        get_screen_size_xfce, set_wallpaper_xfce),
+        get_screen_size_xfce, set_wallpaper_xfce, get_monitors_xrandr,
+        set_monitor_wallpapers_xfce),
 ]
 
 
@@ -449,6 +545,26 @@ def get_monitors() -> list[Monitor]:
     """
     backend = current_backend()
     return backend.monitors() if backend else []
+
+
+def supports_monitor_wallpapers() -> bool:
+    """Whether the detected desktop can set monitors individually."""
+    backend = current_backend()
+    return bool(backend and backend.set_monitor_wallpapers)
+
+
+def set_monitor_wallpapers(images: dict[str, Path]) -> bool:
+    """Set a wallpaper per monitor, leaving other monitors untouched.
+
+    `images` maps connector names to image paths. Returns True only if
+    every named monitor was set; logs and returns False if the desktop
+    can't set monitors individually.
+    """
+    backend = current_backend()
+    if not backend or not backend.set_monitor_wallpapers:
+        logger.error("This desktop can't set wallpapers per monitor.")
+        return False
+    return backend.set_monitor_wallpapers(images)
 
 
 def set_wallpaper(image_path: Path | str) -> bool:
