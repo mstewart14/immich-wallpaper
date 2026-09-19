@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 import time
 import urllib.error
@@ -48,6 +49,8 @@ import screens
 import settings
 
 logger = logging.getLogger(__name__)
+
+SAFE_EXTENSION = re.compile(r"\.[a-z0-9]{1,5}")
 
 EXT_BY_MIME = {
     "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
@@ -79,6 +82,10 @@ MULTI_MONITOR_MODES = ("same", "different", "span")
 # Most photos allowed on one screen, and across a spanned desktop.
 MAX_PHOTOS_PER_SCREEN_LIMIT = 6
 SPAN_MAX_PHOTOS = 6
+# Largest photo (in pixels) we will decode; a 100 megapixel image is already
+# larger than any consumer camera produces.
+MAX_DECODE_PIXELS = 100_000_000
+
 # Multi-monitor images don't try to keep clear of a taskbar: the desktop
 # only reports one work area for all screens, so there is nothing reliable
 # to measure per monitor. The base edge margin still applies.
@@ -113,6 +120,12 @@ def load_required_config() -> dict[str, Any]:
     if not config.get("immich_url") or not config.get("api_key"):
         logger.error("Config is missing immich_url or api_key. "
                      "Run the config UI to finish setup.")
+        sys.exit(1)
+    try:
+        config["immich_url"] = immich_api.validate_base_url(
+            config["immich_url"])
+    except immich_api.UnsafeUrlError as error:
+        logger.error("Config has an unusable immich_url: %s", error)
         sys.exit(1)
     return config
 
@@ -165,9 +178,11 @@ def get_asset_details(config: dict, asset_id: str) -> dict | None:
     """
     try:
         return immich_api.get_json(
-            config["immich_url"], config["api_key"], f"/assets/{asset_id}")
-    except (urllib.error.URLError, json.JSONDecodeError, KeyError):
-        # URLError also covers HTTPError.
+            config["immich_url"], config["api_key"],
+            f"/assets/{immich_api.quote_segment(asset_id)}")
+    except (urllib.error.URLError, ValueError, KeyError):
+        # URLError also covers HTTPError; ValueError covers bad JSON and a
+        # malformed id or URL. The caption is optional, so just go without.
         return None
 
 
@@ -286,7 +301,8 @@ def download_asset_bytes(
     """Download the original file for `asset`; see immich_api.get_bytes()."""
     return immich_api.get_bytes(
         config["immich_url"], config["api_key"],
-        f"/assets/{asset['id']}/original", timeout=DOWNLOAD_TIMEOUT_SECONDS)
+        f"/assets/{immich_api.quote_segment(asset['id'])}/original",
+        timeout=DOWNLOAD_TIMEOUT_SECONDS)
 
 
 def asset_meta(config: dict, asset: dict) -> dict[str, Any]:
@@ -294,7 +310,8 @@ def asset_meta(config: dict, asset: dict) -> dict[str, Any]:
     return {
         "id": asset["id"],
         "original_filename": asset.get("originalFileName"),
-        "web_url": config["immich_url"].rstrip("/") + f"/photos/{asset['id']}",
+        "web_url": (immich_api.validate_base_url(config["immich_url"])
+                    + f"/photos/{immich_api.quote_segment(asset['id'])}"),
     }
 
 
@@ -306,10 +323,18 @@ def _load_oriented(data: bytes):
 
     EXIF rotation is applied.
     """
+    import warnings
+
     from PIL import Image, ImageOps
-    image = Image.open(BytesIO(data))
-    image = ImageOps.exif_transpose(image)
-    return image.convert("RGB")
+    # The bytes come from a remote server, so refuse a "decompression bomb":
+    # a small file that expands to a huge image. Pillow only warns above its
+    # limit, so make that warning an error.
+    Image.MAX_IMAGE_PIXELS = MAX_DECODE_PIXELS
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", Image.DecompressionBombWarning)
+        image = Image.open(BytesIO(data))
+        image = ImageOps.exif_transpose(image)
+        return image.convert("RGB")
 
 
 def _contain_resize(image, target_width: int, target_height: int):
@@ -608,24 +633,37 @@ def _compose_single(
         if show_date:
             draw_date_overlay(
                 canvas, extra_x=insets["left"], extra_top=insets["top"])
-    except (ImportError, OSError, ValueError) as error:
+    except Exception as error:  # noqa: BLE001
+        # The bytes come from a remote server and image decoders can fail in
+        # many ways (bad data, missing plugin, oversized image, ...). Any
+        # failure just means "use the original file instead".
         logger.warning("Could not decode %s (%s); using the original file "
                        "instead", asset.get("originalFileName"), error)
         return None
     return canvas
 
 
+def _save_jpeg(canvas, path: Path) -> Path:
+    """Write `canvas` as a JPEG at `path`, readable by the owner only."""
+    with settings.open_private(path, exclusive=True) as handle:
+        canvas.save(handle, "JPEG", quality=JPEG_QUALITY)
+    return path
+
+
 def _save_original_file(
     asset: dict, data: bytes, content_type: str | None, stem: str,
 ) -> Path:
     """Save a photo's original bytes untouched, keeping its extension."""
-    extension = Path(asset.get("originalFileName", "")).suffix.lower()
-    if not extension or len(extension) > 6:
+    # The file name comes from the server, so only trust a plain short
+    # alphanumeric extension; anything else falls back to the MIME type.
+    extension = Path(asset.get("originalFileName") or "").suffix.lower()
+    if not SAFE_EXTENSION.fullmatch(extension):
         extension = EXT_BY_MIME.get(
             asset.get("originalMimeType"),
             EXT_BY_MIME.get(content_type, ".jpg"))
     path = settings.IMAGES_DIR / f"{stem}{extension}"
-    path.write_bytes(data)
+    with settings.open_private(path, exclusive=True) as handle:
+        handle.write(data)
     return path
 
 
@@ -641,7 +679,7 @@ def build_wallpaper_entry(
     as-is only when there is nothing to draw against -- the screen size is
     unknown and no overlay is enabled -- or when it can't be decoded.
     """
-    settings.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    settings.ensure_private_dir(settings.IMAGES_DIR)
     # Timestamp plus random suffix: unique even across same-second calls.
     stem = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
     show_info = bool(config.get("show_photo_info"))
@@ -665,8 +703,7 @@ def build_wallpaper_entry(
     if canvas is None:
         path = _save_original_file(assets[0], *original, stem)
     else:
-        path = settings.IMAGES_DIR / f"{stem}.jpg"
-        canvas.save(path, "JPEG", quality=JPEG_QUALITY)
+        path = _save_jpeg(canvas, settings.IMAGES_DIR / f"{stem}.jpg")
 
     return {
         "kind": kind,
@@ -813,9 +850,7 @@ def _save_screen_image(
     if canvas is None:
         data, content_type = download(assets[0])
         return _save_original_file(assets[0], data, content_type, file_stem)
-    path = settings.IMAGES_DIR / f"{file_stem}.jpg"
-    canvas.save(path, "JPEG", quality=JPEG_QUALITY)
-    return path
+    return _save_jpeg(canvas, settings.IMAGES_DIR / f"{file_stem}.jpg")
 
 
 def build_multi_entry(
@@ -839,7 +874,7 @@ def build_multi_entry(
         The entry. Its main `path` is the primary monitor's image, and
         `images` maps every monitor to its own file.
     """
-    settings.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    settings.ensure_private_dir(settings.IMAGES_DIR)
     stem = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
     show_info = bool(config.get("show_photo_info"))
     show_date = bool(config.get("show_date_overlay"))
@@ -1025,6 +1060,24 @@ def _build_rotation_entry(
         return None
 
 
+def _private_opener(path: str, flags: int) -> int:
+    """os.open() that creates files readable by the owner only."""
+    return os.open(path, flags, settings.PRIVATE_FILE_MODE)
+
+
+class _PrivateRotatingFileHandler(RotatingFileHandler):
+    """A rotating log file created readable by the owner only.
+
+    The log holds request URLs and response headers, which are nobody
+    else's business.
+    """
+
+    def _open(self):
+        return open(self.baseFilename, self.mode, encoding=self.encoding,
+                    errors=getattr(self, "errors", None),
+                    opener=_private_opener)
+
+
 def _configure_logging() -> None:
     """Send log output to stdout, and failures also to the log file.
 
@@ -1033,8 +1086,10 @@ def _configure_logging() -> None:
     """
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
     try:
-        settings.CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        file_handler = RotatingFileHandler(
+        settings.ensure_private_dir(settings.CACHE_DIR)
+        with contextlib.suppress(FileNotFoundError):
+            settings.LOG_PATH.chmod(settings.PRIVATE_FILE_MODE)
+        file_handler = _PrivateRotatingFileHandler(
             settings.LOG_PATH, maxBytes=LOG_MAX_BYTES,
             backupCount=LOG_BACKUP_COUNT, delay=True)
     except OSError:

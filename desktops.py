@@ -319,6 +319,8 @@ def set_wallpaper_kde(image_path: Path | str) -> bool:
     # on-screen render can silently stop refreshing after the first call,
     # because assigning wallpaperPlugin to its current value is a no-op that
     # Qt's property system skips -- no change signal, no re-render.
+    # json.dumps writes a valid, fully escaped script string, so no
+    # character in the path can end the string and inject script.
     script = f'''
 var allDesktops = desktops();
 for (i = 0; i < allDesktops.length; i++) {{
@@ -326,7 +328,7 @@ for (i = 0; i < allDesktops.length; i++) {{
     d.wallpaperPlugin = "org.kde.color";
     d.wallpaperPlugin = "org.kde.image";
     d.currentConfigGroup = Array("Wallpaper", "org.kde.image", "General");
-    d.writeConfig("Image", "file://{image_path}");
+    d.writeConfig("Image", {json.dumps(f"file://{image_path}")});
     d.writeConfig("FillMode", 1);
 }}
 '''

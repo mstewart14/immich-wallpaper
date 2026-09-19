@@ -9,9 +9,8 @@ import contextlib
 import copy
 import json
 import os
-import stat
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 APP_NAME = "immich-wallpaper"
 CONFIG_DIR = Path.home() / ".config" / APP_NAME
@@ -25,7 +24,12 @@ LOG_PATH = CACHE_DIR / "rotate.log"
 # whether to reuse a running UI or start a new one.
 CONFIG_UI_PORT = 8877
 
-DEFAULT_CONFIG = {
+# Everything we store is private to the user: the config holds the API key,
+# and the cache holds photos from a personal library plus logs.
+PRIVATE_DIR_MODE = 0o700
+PRIVATE_FILE_MODE = 0o600
+
+DEFAULT_CONFIG: dict[str, Any] = {
     "immich_url": "",
     "api_key": "",
     "interval_minutes": 5,
@@ -45,6 +49,39 @@ DEFAULT_CONFIG = {
     # behaviour); more fills a wide screen with several portraits.
     "max_photos_per_screen": 2,
 }
+
+
+# --------------------------------------------------------------------------
+# Private storage
+# --------------------------------------------------------------------------
+def ensure_private_dir(path: Path) -> None:
+    """Create `path` (and parents) if needed, readable by the owner only.
+
+    An existing directory is tightened too, so a cache created before this
+    was enforced stops being readable by other users.
+    """
+    path.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIR_MODE)
+    path.chmod(PRIVATE_DIR_MODE)
+
+
+def open_private(path: Path, exclusive: bool = False) -> IO[bytes]:
+    """Open `path` for binary writing, created readable by the owner only.
+
+    The permissions are set when the file is created, so there is no
+    moment at which it exists with looser ones. With `exclusive` it is an
+    error for the file to exist already.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_EXCL if exclusive else os.O_TRUNC)
+    descriptor = os.open(path, flags, PRIVATE_FILE_MODE)
+    return os.fdopen(descriptor, "wb")
+
+
+def write_private(path: Path, text: str) -> None:
+    """Atomically replace `path` with `text`, readable by the owner only."""
+    temp_path = path.with_name(path.name + ".tmp")
+    with open_private(temp_path) as handle:
+        handle.write(text.encode())
+    temp_path.replace(path)
 
 
 # --------------------------------------------------------------------------
@@ -75,11 +112,8 @@ def save_config(config: dict[str, Any]) -> None:
 
     The file holds the API key, hence the restricted permissions.
     """
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    temp_path = CONFIG_PATH.with_suffix(".json.tmp")
-    temp_path.write_text(json.dumps(config, indent=2))
-    os.chmod(temp_path, stat.S_IRUSR | stat.S_IWUSR)
-    temp_path.replace(CONFIG_PATH)
+    ensure_private_dir(CONFIG_DIR)
+    write_private(CONFIG_PATH, json.dumps(config, indent=2))
 
 
 # --------------------------------------------------------------------------
@@ -115,10 +149,8 @@ def load_state() -> dict[str, Any]:
 
 def save_state(state: dict[str, Any]) -> None:
     """Persist `state` atomically (write a temp file, then rename it)."""
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    temp_path = STATE_PATH.with_suffix(".json.tmp")
-    temp_path.write_text(json.dumps(state))
-    temp_path.replace(STATE_PATH)
+    ensure_private_dir(CACHE_DIR)
+    write_private(STATE_PATH, json.dumps(state))
 
 
 def set_paused(paused: bool) -> dict[str, Any]:
