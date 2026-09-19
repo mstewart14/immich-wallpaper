@@ -30,6 +30,13 @@ import settings
 HERE = Path(__file__).resolve().parent
 INDEX_HTML = HERE / "index.html"
 
+# Static files the page may request: URL path -> (file, content type).
+# A fixed whitelist, so a request can never name an arbitrary file.
+STATIC_ASSETS = {
+    "/assets/app-icon.png": (HERE / "assets" / "app-icon.png", "image/png"),
+}
+ASSET_CACHE_SECONDS = 86400
+
 DEFAULT_PORT = settings.CONFIG_UI_PORT
 IMMICH_TIMEOUT_SECONDS = 15
 # Applying a saved config runs a full rotation, which downloads photos.
@@ -69,6 +76,20 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def _send_static_asset(self, file_path: Path, content_type: str) -> None:
+        try:
+            payload = file_path.read_bytes()
+        except OSError:
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", f"max-age={ASSET_CACHE_SECONDS}")
+        self.end_headers()
+        self.wfile.write(payload)
+
     def _read_json_body(self) -> Any:
         length = int(self.headers.get("Content-Length", 0))
         if length == 0:
@@ -84,7 +105,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- routes --------------------------------------------------------
     def do_GET(self) -> None:
-        """Route GET requests: the page, the config, and person thumbnails."""
+        """Route GET requests: the page, its assets, config and thumbnails."""
         path = self._path()
         if path == "/":
             payload = INDEX_HTML.read_text().encode()
@@ -93,6 +114,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+        elif path in STATIC_ASSETS:
+            self._send_static_asset(*STATIC_ASSETS[path])
         elif path == "/api/config":
             self._send_json(settings.load_config())
         elif path == "/api/person-thumb":

@@ -1,4 +1,8 @@
-# immich-wallpaper
+<p align="center">
+  <img src="assets/app-icon.png" alt="immich-wallpaper logo" width="128">
+</p>
+
+<h1 align="center">immich-wallpaper</h1>
 
 Rotate your desktop wallpaper using photos pulled live from your own
 [Immich](https://immich.app) library — filtered by album or person, changed
