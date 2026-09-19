@@ -70,11 +70,12 @@ def quote_segment(value: object) -> str:
     """Make `value` safe to use as one segment of a URL path.
 
     Slashes and other special characters are percent-encoded, so an
-    identifier can't reach a different endpoint. "." and ".." are refused
-    because a client or server may resolve them as path steps.
+    identifier can't reach a different endpoint. An empty identifier is
+    refused, and so are "." and ".." because a client or server may
+    resolve them as path steps.
     """
     text = str(value)
-    if text in (".", ".."):
+    if text in ("", ".", ".."):
         raise ValueError(f"not a valid identifier: {text!r}")
     return urllib.parse.quote(text, safe="")
 
@@ -160,7 +161,9 @@ def _open(
 ) -> tuple[bytes, str | None]:
     """Perform one request; return (response bytes, Content-Type header)."""
     data = json.dumps(body).encode() if body is not None else None
-    request = urllib.request.Request(
+    # S310: the URL was validated to http(s) by _api_url, and the opener
+    # below only speaks http(s), so a file: or custom scheme can't be opened.
+    request = urllib.request.Request(  # noqa: S310
         _api_url(base_url, path), data=data, method=method)
     if api_key:
         request.add_header("x-api-key", api_key)

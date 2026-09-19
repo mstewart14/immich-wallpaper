@@ -48,8 +48,8 @@ class QuoteSegmentTests(unittest.TestCase):
         self.assertNotIn("?", quoted)
         self.assertNotIn("=", quoted)
 
-    def test_dot_segments_are_refused(self):
-        for value in (".", ".."):
+    def test_dot_segments_and_empty_ids_are_refused(self):
+        for value in ("", ".", ".."):
             with self.assertRaises(ValueError):
                 immich_api.quote_segment(value)
 

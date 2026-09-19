@@ -14,6 +14,7 @@ Running it again while it is open just brings the existing window forward.
 from __future__ import annotations
 
 import contextlib
+import logging
 import sys
 import threading
 from pathlib import Path
@@ -31,6 +32,8 @@ except (ImportError, ValueError) as error:  # pragma: no cover
 
 import settings
 import settings_service as service
+
+logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
 APP_ID = "io.github.mstewart14.ImmichWallpaper"
@@ -552,8 +555,10 @@ class SettingsPanel(Gtk.Box):
                     url, key = credentials
                     data = service.fetch_person_thumbnail(url, key, person_id)
                     GLib.idle_add(self._show_thumbnail, person_id, data)
-                except Exception:  # noqa: BLE001
-                    continue  # a missing thumbnail is not worth reporting
+                except Exception:
+                    # A missing thumbnail is not worth telling the user.
+                    logger.debug("no thumbnail for %s", person_id,
+                                 exc_info=True)
 
         threading.Thread(target=worker, daemon=True).start()
 

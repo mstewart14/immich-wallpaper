@@ -195,7 +195,8 @@ def ensure_dbus_env() -> None:
 def ensure_display_env() -> None:
     """Point DISPLAY at the first X11 socket if unset (see ensure_dbus_env)."""
     if "DISPLAY" not in os.environ:
-        sockets = sorted(glob.glob("/tmp/.X11-unix/X*"))
+        # S108: this is the X server's own well-known socket directory.
+        sockets = sorted(glob.glob("/tmp/.X11-unix/X*"))  # noqa: S108
         if sockets:
             display_number = os.path.basename(sockets[0])[1:]
             os.environ["DISPLAY"] = ":" + display_number

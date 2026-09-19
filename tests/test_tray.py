@@ -3,6 +3,8 @@ import sys
 import unittest
 from unittest import mock
 
+import settings
+
 try:
     import tray_app
 except SystemExit:  # pystray / Pillow not installed
@@ -22,14 +24,28 @@ class SettingsLauncherTests(unittest.TestCase):
         web.assert_not_called()
         browser.assert_not_called()
 
-    def test_other_platforms_use_the_web_page(self):
+    def test_other_platforms_open_the_running_page_with_its_token(self):
+        settings.ensure_private_dir(settings.CACHE_DIR)
+        settings.UI_TOKEN_PATH.write_text("tok-123\n")
+        self.addCleanup(settings.UI_TOKEN_PATH.unlink, missing_ok=True)
         with mock.patch.object(tray_app, "NATIVE_SETTINGS", False), \
                 mock.patch.object(tray_app.subprocess, "Popen") as popen, \
-                mock.patch.object(tray_app.urllib.request, "urlopen"), \
+                mock.patch.object(tray_app.urllib.request,
+                                  "urlopen") as probe, \
                 mock.patch.object(tray_app.webbrowser, "open") as browser:
             tray_app._settings_worker()      # the page is already running
-        browser.assert_called_once()
+        self.assertTrue(probe.call_args.args[0].endswith("/ping"))
+        browser.assert_called_once_with(tray_app.CONFIG_UI_URL
+                                        + "?token=tok-123")
         popen.assert_not_called()
+
+    def test_without_a_readable_token_the_bare_page_is_opened(self):
+        settings.UI_TOKEN_PATH.unlink(missing_ok=True)
+        with mock.patch.object(tray_app, "NATIVE_SETTINGS", False), \
+                mock.patch.object(tray_app.urllib.request, "urlopen"), \
+                mock.patch.object(tray_app.webbrowser, "open") as browser:
+            tray_app._settings_worker()
+        browser.assert_called_once_with(tray_app.CONFIG_UI_URL)
 
     def test_other_platforms_start_the_web_page_when_it_is_not_running(self):
         with mock.patch.object(tray_app, "NATIVE_SETTINGS", False), \

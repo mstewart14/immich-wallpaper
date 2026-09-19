@@ -1,32 +1,53 @@
 #!/usr/bin/env python3
-"""Local configuration UI for the Immich wallpaper rotator.
+"""Web settings page for the Immich wallpaper rotator (non-Linux platforms).
 
-Stdlib-only (no pip installs) so it runs unmodified on any desktop Linux
-box with Python 3.8+ -- this machine (KDE Plasma) and a Manjaro XFCE box
-alike. Binds to 127.0.0.1 only; nothing outside this machine can reach it.
+On Linux the settings screen is the native window (settings_window.py) and
+this server is neither installed nor started. It remains for platforms where
+GTK is not practical to install, and it needs nothing beyond the standard
+library.
 
 Usage:
     python3 config_ui.py [--port 8877] [--no-browser]
 
 Config is read/written at ~/.config/immich-wallpaper/config.json (mode 600).
+
+Security model. The page can change what the rotator does and talks to your
+Immich server with your API key, and any web page in your browser can try to
+reach a server on localhost, so it does not rely on "only I can reach it":
+
+* Every request must carry a random per-run access token. It is delivered
+  once, in the link this program opens (and prints), and becomes an
+  HttpOnly, SameSite=Strict cookie. Other web pages and other local users
+  do not have it.
+* The Host header must be this server's own address (blocking DNS
+  rebinding), any Origin header must be this same origin, and POSTs must be
+  application/json.
+* The API key is never sent to the browser. Requests that need it use the
+  saved key, and only for the saved server URL, so a typo can't send it
+  somewhere else.
+* Request bodies are size-limited and connections time out.
+* Responses carry a strict Content-Security-Policy and other hardening
+  headers, and all validation is the shared settings_service.
 """
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
+import hashlib
+import http.cookies
 import json
-import subprocess
+import re
+import secrets
 import sys
-import urllib.error
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-import desktops
-import immich_api
 import settings
+import settings_service as service
 
 HERE = Path(__file__).resolve().parent
 INDEX_HTML = HERE / "index.html"
@@ -39,317 +60,310 @@ STATIC_ASSETS = {
 ASSET_CACHE_SECONDS = 86400
 
 DEFAULT_PORT = settings.CONFIG_UI_PORT
-IMMICH_TIMEOUT_SECONDS = 15
-# Applying a saved config runs a full rotation, which downloads photos.
-APPLY_TIMEOUT_SECONDS = 90
-
-PEOPLE_PAGE_SIZE = 250
-# Safety valve on paging through people: 40 pages of 250 is 10k people.
-MAX_PEOPLE_PAGES = 40
-
-PERSON_MATCH_MODES = ("any", "all", "both")
-MULTI_MONITOR_MODES = ("same", "different", "span")
-PHOTOS_PER_SCREEN_RANGE = (1, 6)
-WHOLE_NUMBER_KEYS = ("interval_minutes", "keep_count")
-LIST_KEYS = ("albums", "people")
-FLAG_KEYS = ("show_photo_info", "show_date_overlay")
+REQUEST_TIMEOUT_SECONDS = 30
+MAX_BODY_BYTES = 1024 * 1024
+SESSION_COOKIE = "iw_session"
+TOKEN_HEADER = "X-IW-Token"  # noqa: S105 (a header name, not a secret)
+CONTENT_LENGTH = re.compile(r"[0-9]{1,10}")
 
 
-def _credentials(body: dict[str, Any]) -> tuple[str, str]:
-    """Return the (server URL, API key) from a request body, stripped."""
-    url = (body.get("immich_url") or "").strip()
-    key = (body.get("api_key") or "").strip()
-    return url, key
+def content_security_policy(html: str) -> str:
+    """A policy that allows only the page's own inline script and style.
+
+    They are allowed by content hash, so no `unsafe-inline` is needed, and
+    nothing else may run or load: no other origins, frames or forms.
+    """
+    def hashes(tag: str) -> str:
+        found = re.findall(rf"<{tag}(?:\s[^>]*)?>(.*?)</{tag}>", html,
+                           flags=re.DOTALL)
+        digests = (base64.b64encode(
+            hashlib.sha256(text.encode()).digest()).decode()
+            for text in found)
+        return " ".join(f"'sha256-{digest}'" for digest in digests) or "'none'"
+
+    return "; ".join([
+        "default-src 'none'",
+        f"script-src {hashes('script')}",
+        f"style-src {hashes('style')}",
+        "img-src 'self' blob:",
+        "connect-src 'self'",
+        "base-uri 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'none'",
+    ])
 
 
 class Handler(BaseHTTPRequestHandler):
     """Serves the settings page and its JSON API."""
 
     server_version = "ImmichWallpaperConfigUI/1.0"
+    timeout = REQUEST_TIMEOUT_SECONDS
 
     def log_message(self, format: str, *args: Any) -> None:
         """Keep the terminal quiet; errors are still sent to the client."""
 
-    # ---- helpers -------------------------------------------------------
-    def _send_json(self, obj: Any, status: int = 200) -> None:
-        payload = json.dumps(obj).encode()
+    def end_headers(self) -> None:
+        """Add the hardening headers every response carries."""
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        super().end_headers()
+
+    # ---- access control -----------------------------------------------
+    def _own_hosts(self) -> set[str]:
+        port = self.server.server_address[1]
+        return {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+    def _request_is_local(self) -> bool:
+        """Whether the Host and Origin headers name this server itself.
+
+        A wrong Host is the mark of DNS rebinding, and a foreign Origin the
+        mark of a page on another site talking to us.
+        """
+        hosts = self._own_hosts()
+        if self.headers.get("Host", "").lower() not in hosts:
+            return False
+        origin = self.headers.get("Origin")
+        return origin is None or origin.lower() in {
+            f"http://{host}" for host in hosts}
+
+    def _supplied_token(self) -> str:
+        cookies = http.cookies.SimpleCookie()
+        with contextlib.suppress(http.cookies.CookieError):
+            cookies.load(self.headers.get("Cookie", ""))
+        cookie = cookies.get(SESSION_COOKIE)
+        return ((cookie.value if cookie else "")
+                or self.headers.get(TOKEN_HEADER, ""))
+
+    def _token_matches(self, supplied: str) -> bool:
+        token = getattr(self.server, "token", "")
+        return bool(token and supplied) and secrets.compare_digest(
+            supplied.encode(), token.encode())
+
+    def _authorized(self) -> bool:
+        return self._token_matches(self._supplied_token())
+
+    # ---- responses ----------------------------------------------------
+    def _send(
+        self, status: int, body: bytes, content_type: str,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
-        self.wfile.write(payload)
+        self.wfile.write(body)
+
+    def _send_json(self, obj: Any, status: int = 200) -> None:
+        self._send(status, json.dumps(obj).encode(), "application/json",
+                   {"Cache-Control": "no-store"})
+
+    def _send_text(self, status: int, text: str) -> None:
+        self._send(status, text.encode(), "text/plain; charset=utf-8",
+                   {"Cache-Control": "no-store"})
+
+    def _send_page(self) -> None:
+        html = INDEX_HTML.read_text()
+        self._send(200, html.encode(), "text/html; charset=utf-8", {
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": content_security_policy(html),
+        })
 
     def _send_static_asset(self, file_path: Path, content_type: str) -> None:
         try:
             payload = file_path.read_bytes()
         except OSError:
-            self.send_response(404)
-            self.end_headers()
+            self._send_text(404, "Not found")
             return
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Cache-Control", f"max-age={ASSET_CACHE_SECONDS}")
-        self.end_headers()
-        self.wfile.write(payload)
+        self._send(200, payload, content_type,
+                   {"Cache-Control": f"max-age={ASSET_CACHE_SECONDS}"})
 
-    def _read_json_body(self) -> Any:
-        length = int(self.headers.get("Content-Length", 0))
-        if length == 0:
-            return {}
-        raw = self.rfile.read(length)
-        return json.loads(raw) if raw else {}
+    def _reject_not_authorized(self) -> None:
+        self._send_text(
+            403, "Forbidden. Open the settings from the tray icon, or use "
+                 "the link printed by config_ui.py.")
+
+    # ---- request parsing ----------------------------------------------
+    def _path(self) -> str:
+        return urlparse(self.path).path
 
     def _query(self) -> dict[str, list[str]]:
         return parse_qs(urlparse(self.path).query)
 
-    def _path(self) -> str:
-        return urlparse(self.path).path
+    def _read_json_body(self) -> dict[str, Any] | None:
+        """The request's JSON object, or None after sending an error."""
+        if self.headers.get_content_type() != "application/json":
+            self._send_json({"ok": False, "error":
+                             "Content-Type must be application/json"}, 415)
+            return None
+        declared = self.headers.get("Content-Length")
+        if declared is None:
+            return {}
+        if not CONTENT_LENGTH.fullmatch(declared):
+            self._send_json({"ok": False, "error": "bad Content-Length"}, 400)
+            return None
+        length = int(declared)
+        if length > MAX_BODY_BYTES:
+            self._send_json({"ok": False, "error": "request too large"}, 413)
+            return None
+        try:
+            raw = self.rfile.read(length)
+        except OSError:
+            self._send_json({"ok": False, "error": "request timed out"}, 408)
+            return None
+        try:
+            body = json.loads(raw) if raw else {}
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            self._send_json({"ok": False, "error": "invalid JSON body"}, 400)
+            return None
+        return body
 
-    # ---- routes --------------------------------------------------------
+    # ---- routes -------------------------------------------------------
     def do_GET(self) -> None:
-        """Route GET requests: the page, its assets, config and thumbnails."""
+        """Route GET requests: the page, its assets, config and monitors."""
+        if not self._request_is_local():
+            self._send_text(403, "Forbidden")
+            return
         path = self._path()
+        if path == "/ping":
+            self._send_text(200, "ok")  # for the tray: nothing sensitive
+            return
+        if path == "/" and "token" in self._query():
+            self._start_session(self._query()["token"][0])
+            return
+        if not self._authorized():
+            self._reject_not_authorized()
+            return
         if path == "/":
-            payload = INDEX_HTML.read_text().encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self._send_page()
         elif path in STATIC_ASSETS:
             self._send_static_asset(*STATIC_ASSETS[path])
         elif path == "/api/config":
-            self._send_json(settings.load_config())
+            self._send_json(self._config_for_page())
         elif path == "/api/monitors":
-            self._handle_monitors()
-        elif path == "/api/person-thumb":
-            self._handle_person_thumbnail()
+            self._send_json(service.describe_monitors())
         else:
-            self.send_response(404)
-            self.end_headers()
+            self._send_text(404, "Not found")
 
     def do_POST(self) -> None:
         """Route POST requests to the matching handler."""
-        path = self._path()
-        try:
-            body = self._read_json_body()
-        except json.JSONDecodeError:
-            self._send_json({"ok": False, "error": "invalid JSON body"}, 400)
+        if not self._request_is_local():
+            self._send_text(403, "Forbidden")
             return
-
-        if path == "/api/test":
-            self._handle_test(body)
-        elif path == "/api/albums":
-            self._handle_albums(body)
-        elif path == "/api/people":
-            self._handle_people(body)
-        elif path == "/api/save":
-            self._handle_save(body)
+        if not self._authorized():
+            self._reject_not_authorized()
+            return
+        body = self._read_json_body()
+        if body is None:
+            return
+        routes = {
+            "/api/test": self._handle_test,
+            "/api/albums": self._handle_albums,
+            "/api/people": self._handle_people,
+            "/api/person-thumb": self._handle_person_thumbnail,
+            "/api/save": self._handle_save,
+        }
+        handler = routes.get(self._path())
+        if handler is None:
+            self._send_text(404, "Not found")
         else:
-            self.send_response(404)
-            self.end_headers()
+            handler(body)
 
-    # ---- handlers ------------------------------------------------------
-    def _handle_person_thumbnail(self) -> None:
-        query = self._query()
-        person_id = query.get("person_id", [None])[0]
-        immich_url = query.get("immich_url", [None])[0]
-        api_key = query.get("api_key", [None])[0]
-        if not (person_id and immich_url and api_key):
-            self.send_response(400)
-            self.end_headers()
+    def _start_session(self, supplied: str) -> None:
+        """Trade the link's token for a session cookie, then go to the page."""
+        if not self._token_matches(supplied):
+            self._reject_not_authorized()
             return
-        try:
-            data, _ = immich_api.get_bytes(
-                immich_url, api_key, f"/people/{person_id}/thumbnail",
-                timeout=IMMICH_TIMEOUT_SECONDS)
-        except Exception:  # noqa: BLE001
-            # Whatever went wrong talking to Immich, answer with a 502
-            # rather than dropping the connection.
-            self.send_response(502)
-            self.end_headers()
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "image/jpeg")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "max-age=3600")
+        self.send_response(302)
+        self.send_header("Location", "/")
+        self.send_header(
+            "Set-Cookie",
+            f"{SESSION_COOKIE}={supplied}; HttpOnly; SameSite=Strict; Path=/")
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(data)
 
-    def _handle_monitors(self) -> None:
-        """List the connected monitors and whether each can be set alone."""
-        monitors = desktops.get_monitors()
-        self._send_json({
-            "ok": True,
-            "monitors": [
-                {"name": monitor.name, "x": monitor.x, "y": monitor.y,
-                 "width": monitor.width, "height": monitor.height,
-                 "primary": monitor.primary}
-                for monitor in monitors],
-            "per_monitor": desktops.supports_monitor_wallpapers(),
-        })
+    def _config_for_page(self) -> dict[str, Any]:
+        """The saved config, without the API key (which stays server-side)."""
+        config = settings.load_config()
+        api_key_set = bool(config.get("api_key"))
+        config["api_key"] = ""
+        config["api_key_set"] = api_key_set
+        return config
+
+    # ---- handlers -----------------------------------------------------
+    def _with_credentials(self, body: dict[str, Any], action) -> None:
+        """Run action(url, key) and send its result.
+
+        A credential problem is sent as a normal error reply instead.
+        """
+        try:
+            url, key = service.resolve_credentials(body)
+        except service.SettingsError as error:
+            self._send_json({"ok": False, "error": str(error)})
+            return
+        self._send_json(action(url, key))
 
     def _handle_test(self, body: dict[str, Any]) -> None:
-        """Check that the server is reachable and the API key is accepted."""
-        url, key = _credentials(body)
-        if not url or not key:
-            self._send_json({
-                "ok": False,
-                "error": "Server URL and API key are both required.",
-            })
-            return
-        try:
-            ping = immich_api.get_json(
-                url, key, "/server/ping", timeout=IMMICH_TIMEOUT_SECONDS)
-        except urllib.error.URLError as error:
-            self._send_json({
-                "ok": False,
-                "error": f"Could not reach {url}: {error.reason}",
-            })
-            return
-        except Exception as error:  # noqa: BLE001
-            self._send_json({
-                "ok": False, "error": f"Could not reach server: {error}",
-            })
-            return
-        if not ping or "res" not in ping:
-            self._send_json({
-                "ok": False,
-                "error": "Server responded but not with a valid Immich ping.",
-            })
-            return
-        try:
-            albums = immich_api.get_json(
-                url, key, "/albums", timeout=IMMICH_TIMEOUT_SECONDS)
-        except urllib.error.HTTPError as error:
-            if error.code in (401, 403):
-                message = ("Server reachable, but the API key was rejected "
-                           "(401/403). Check the key and its permissions.")
-            else:
-                message = ("Server reachable, but the auth check failed: "
-                           f"HTTP {error.code}")
-            self._send_json({"ok": False, "error": message})
-            return
-        except Exception as error:  # noqa: BLE001
-            self._send_json({
-                "ok": False,
-                "error": f"Server reachable, but auth check failed: {error}",
-            })
-            return
-        self._send_json({
-            "ok": True,
-            "album_count": len(albums) if isinstance(albums, list) else None,
-        })
+        self._with_credentials(body, service.check_connection)
 
     def _handle_albums(self, body: dict[str, Any]) -> None:
-        """List the server's albums, sorted by name."""
-        url, key = _credentials(body)
-        try:
-            albums = immich_api.get_json(
-                url, key, "/albums", timeout=IMMICH_TIMEOUT_SECONDS)
-        except Exception as error:  # noqa: BLE001
-            self._send_json({"ok": False, "error": str(error)})
-            return
-        listing = sorted(
-            [{"id": album["id"],
-              "name": album.get("albumName") or "(untitled album)",
-              "count": album.get("assetCount", 0)} for album in albums],
-            key=lambda album: album["name"].lower(),
-        )
-        self._send_json({"ok": True, "albums": listing})
+        self._with_credentials(body, service.list_albums)
 
     def _handle_people(self, body: dict[str, Any]) -> None:
-        """List the server's people (all pages), named ones first."""
-        url, key = _credentials(body)
-        people: list[dict] = []
+        self._with_credentials(body, service.list_people)
+
+    def _handle_person_thumbnail(self, body: dict[str, Any]) -> None:
+        """A person's face thumbnail, fetched with the right credentials.
+
+        This is a POST so the API key never appears in a URL.
+        """
         try:
-            for page in range(1, MAX_PEOPLE_PAGES + 1):
-                reply = immich_api.get_json(
-                    url, key,
-                    f"/people?page={page}&size={PEOPLE_PAGE_SIZE}"
-                    "&withHidden=true",
-                    timeout=IMMICH_TIMEOUT_SECONDS)
-                batch = reply.get("people", [])
-                people.extend(batch)
-                if not reply.get("hasNextPage") or not batch:
-                    break
-        except Exception as error:  # noqa: BLE001
-            self._send_json({"ok": False, "error": str(error)})
+            url, key = service.resolve_credentials(body)
+            data = service.fetch_person_thumbnail(
+                url, key, str(body.get("person_id") or ""))
+        except (service.SettingsError, ValueError):
+            self._send_text(400, "Bad request")
             return
-        listing = sorted(
-            [{"id": person["id"],
-              "name": person.get("name") or "(unnamed person)",
-              "hidden": person.get("isHidden", False)} for person in people],
-            key=lambda person: (person["name"] == "(unnamed person)",
-                                person["name"].lower()),
-        )
-        self._send_json({"ok": True, "people": listing})
+        except Exception as error:  # noqa: BLE001
+            # Whatever went wrong talking to Immich, answer with a 502
+            # rather than dropping the connection.
+            with contextlib.suppress(Exception):
+                error.close()  # type: ignore[attr-defined]
+            self._send_text(502, "Bad gateway")
+            return
+        self._send(200, data, "image/jpeg", {"Cache-Control": "no-store"})
 
     def _handle_save(self, body: dict[str, Any]) -> None:
-        """Save the submitted settings, then run one rotation.
+        result = service.save_settings(body)
+        self._send_json(result, 200 if result["ok"] else 400)
 
-        The rotation makes the change show up straight away.
-        """
-        config = settings.load_config()
-        for key in ("immich_url", "api_key"):
-            if key in body:
-                config[key] = str(body[key]).strip()
-        for key in WHOLE_NUMBER_KEYS:
-            if key in body:
-                try:
-                    config[key] = max(1, int(body[key]))
-                except (TypeError, ValueError):
-                    message = f"{key} must be a whole number"
-                    self._send_json({"ok": False, "error": message}, 400)
-                    return
-        for key in LIST_KEYS:
-            if key in body and isinstance(body[key], list):
-                config[key] = body[key]
-        if body.get("person_match") in PERSON_MATCH_MODES:
-            config["person_match"] = body["person_match"]
-        if body.get("multi_monitor_mode") in MULTI_MONITOR_MODES:
-            config["multi_monitor_mode"] = body["multi_monitor_mode"]
-        if isinstance(body.get("monitors"), list):
-            config["monitors"] = [
-                str(name).strip() for name in body["monitors"]
-                if isinstance(name, str) and name.strip()]
-        if "max_photos_per_screen" in body:
-            try:
-                low, high = PHOTOS_PER_SCREEN_RANGE
-                config["max_photos_per_screen"] = min(
-                    high, max(low, int(body["max_photos_per_screen"])))
-            except (TypeError, ValueError):
-                message = "max_photos_per_screen must be a whole number"
-                self._send_json({"ok": False, "error": message}, 400)
-                return
-        for key in FLAG_KEYS:
-            if key in body:
-                config[key] = bool(body[key])
-        settings.save_config(config)
 
-        applied = False
-        try:
-            result = subprocess.run(
-                [sys.executable, str(HERE / "rotate.py"), "--once"],
-                capture_output=True, text=True, timeout=APPLY_TIMEOUT_SECONDS,
-            )
-            applied = result.returncode == 0
-        except (subprocess.TimeoutExpired, OSError):
-            pass
-        self._send_json({"ok": True, "applied": applied})
+def publish_token(token: str) -> None:
+    """Make the run's access token available to the tray, owner-only."""
+    settings.ensure_private_dir(settings.CACHE_DIR)
+    with settings.open_private(settings.UI_TOKEN_PATH) as handle:
+        handle.write(token.encode())
 
 
 def main() -> None:
-    """Run the config UI server until interrupted."""
+    """Run the web settings page until interrupted."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    url = f"http://127.0.0.1:{args.port}/"
-    print(f"Immich wallpaper config UI running at {url}  (Ctrl+C to stop)")
+    token = secrets.token_urlsafe(32)
+    server.token = token  # type: ignore[attr-defined]
+    publish_token(token)
+    url = f"http://127.0.0.1:{args.port}/?token={token}"
+    print(f"Immich wallpaper settings running at {url}  (Ctrl+C to stop)")
     print(f"Config file: {settings.CONFIG_PATH}")
     if not args.no_browser:
         # Opening a browser is a convenience; the URL is printed above.
@@ -360,6 +374,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nStopped.")
         sys.exit(0)
+    finally:
+        settings.UI_TOKEN_PATH.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

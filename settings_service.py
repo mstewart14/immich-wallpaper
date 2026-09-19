@@ -221,6 +221,7 @@ def check_connection(url: str, key: str) -> dict[str, Any]:
         albums = immich_api.get_json(
             url, key, "/albums", timeout=IMMICH_TIMEOUT_SECONDS)
     except urllib.error.HTTPError as error:
+        error.close()
         if error.code in (401, 403):
             message = ("Server reachable, but the API key was rejected "
                        "(401/403). Check the key and its permissions.")

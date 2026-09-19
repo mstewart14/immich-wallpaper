@@ -58,6 +58,10 @@
   .item img { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; background: var(--border); flex-shrink: 0; }
   .item .name { flex: 1; }
   .item .count { color: var(--muted); font-size: .8rem; }
+  .tight-top { margin: .5rem 0 0; }
+  .spaced-label { margin-top: 1rem; }
+  input.narrow { max-width: 6rem; }
+  button.full { width: 100%; }
   .save-bar { position: sticky; bottom: 0; background: var(--bg); padding-top: .75rem; }
   .hint { color: var(--muted); font-size: .85rem; margin-top: .35rem; }
   .filter { width: 100%; margin-bottom: .5rem; }
@@ -84,7 +88,7 @@
     <input type="password" id="key" placeholder="paste API key">
     <details open id="scope-help">
       <summary>Which permissions should this key have?</summary>
-      <p style="margin:.5rem 0 0">In Immich, go to <strong>Account Settings &rarr; API Keys &rarr; New API Key</strong>, give it a name like <code>wallpaper-rotator</code>, and grant only these read/download scopes (uncheck everything else &mdash; especially anything with write/delete/admin):</p>
+      <p class="tight-top">In Immich, go to <strong>Account Settings &rarr; API Keys &rarr; New API Key</strong>, give it a name like <code>wallpaper-rotator</code>, and grant only these read/download scopes (uncheck everything else &mdash; especially anything with write/delete/admin):</p>
       <ul class="scopes">
         <li><code>asset.read</code> &mdash; see photo metadata</li>
         <li><code>asset.download</code> &mdash; download the actual image bytes</li>
@@ -115,7 +119,7 @@
     <div id="person-list" class="list empty">Test the connection above, then click Load.</div>
     <div class="actions"><button class="secondary" id="btn-load-people">Load people</button></div>
 
-    <label style="margin-top:1rem">When multiple people are selected</label>
+    <label class="spaced-label">When multiple people are selected</label>
     <div class="radio-row">
       <label class="radio-opt">
         <input type="radio" name="person-match" value="any" checked>
@@ -188,12 +192,12 @@
     </div>
 
     <label for="photos-per-screen">Most photos on one screen</label>
-    <input type="number" id="photos-per-screen" min="1" max="6" value="2" style="max-width:6rem">
+    <input type="number" id="photos-per-screen" class="narrow" min="1" max="6" value="2">
     <p class="hint">1 never pairs photos. 2 puts two portraits side by side on a wide screen (the default). More fills a very wide screen with several portraits.</p>
   </section>
 
   <div class="save-bar">
-    <button id="btn-save" style="width:100%">Save configuration</button>
+    <button id="btn-save" class="full">Save configuration</button>
     <div id="save-status" class="status"></div>
   </div>
 </main>
@@ -213,7 +217,10 @@ async function api(path, body) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body || {}),
   });
-  return res.json();
+  try { return await res.json(); }
+  catch (e) {
+    return { ok: false, error: `The settings server refused the request (HTTP ${res.status}). Reopen this page from the tray icon.` };
+  }
 }
 
 function setStatus(el, ok, msg) {
@@ -233,6 +240,24 @@ $('btn-test').addEventListener('click', async () => {
   } catch (e) { setStatus(el, false, 'Request failed: ' + e); }
 });
 
+// Face thumbnails are fetched with a POST (so the API key never appears in a
+// URL) when they scroll into view, and shown from a local blob.
+const thumbObserver = new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    thumbObserver.unobserve(entry.target);
+    loadThumbnail(entry.target);
+  }
+});
+async function loadThumbnail(img) {
+  const res = await fetch('/api/person-thumb', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...creds(), person_id: img.dataset.personId }),
+  });
+  if (res.ok) img.src = URL.createObjectURL(await res.blob());
+}
+
 function renderList(container, items, selectedMap, kind) {
   container.classList.remove('empty');
   if (!items.length) { container.classList.add('empty'); container.textContent = 'Nothing found.'; return; }
@@ -250,8 +275,8 @@ function renderList(container, items, selectedMap, kind) {
     row.appendChild(cb);
     if (kind === 'person') {
       const img = document.createElement('img');
-      img.loading = 'lazy';
-      img.src = `/api/person-thumb?person_id=${encodeURIComponent(item.id)}&immich_url=${encodeURIComponent(creds().immich_url)}&api_key=${encodeURIComponent(creds().api_key)}`;
+      img.dataset.personId = item.id;
+      thumbObserver.observe(img);
       row.appendChild(img);
     }
     const name = document.createElement('span');
@@ -322,9 +347,15 @@ $('btn-save').addEventListener('click', async () => {
 // Load existing config on page open
 (async () => {
   const res = await fetch('/api/config');
+  if (!res.ok) {
+    setStatus($('save-status'), false, 'Could not load the settings. Open this page from the tray icon, or use the link printed by config_ui.py.');
+    return;
+  }
   const cfg = await res.json();
   $('url').value = cfg.immich_url || '';
-  $('key').value = cfg.api_key || '';
+  // The saved key stays on the server: the page only learns that one exists.
+  $('key').value = '';
+  $('key').placeholder = cfg.api_key_set ? 'saved \u2014 leave blank to keep it' : 'paste API key';
   $('interval').value = cfg.interval_minutes || 5;
   $('keep').value = cfg.keep_count || 2;
   for (const a of (cfg.albums || [])) selectedAlbums.set(a.id, a);

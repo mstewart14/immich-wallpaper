@@ -14,6 +14,7 @@ protocol natively.
 from __future__ import annotations
 
 import http.client
+import logging
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,8 @@ except ImportError as error:
     print("On Debian/Ubuntu: sudo apt install python3-pystray python3-pil "
           "gir1.2-ayatanaappindicator3-0.1")
     sys.exit(1)
+
+logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
 FLOWER_ASSET = HERE / "assets" / "immich-flower.png"
@@ -255,10 +258,10 @@ def notify(icon, message: str, title: str = "Immich Wallpaper") -> None:
     try:
         icon.notify(message, title)
         return
-    except Exception:  # noqa: BLE001
+    except Exception:
         # Tray backends fail in backend-specific ways when they don't
         # support notifications; fall back to notify-send below.
-        pass
+        logger.debug("icon.notify failed", exc_info=True)
     if shutil.which("notify-send"):
         subprocess.run(["notify-send", title, message], capture_output=True)
 
@@ -360,6 +363,19 @@ def action_forward(icon, item) -> None:
         refresh_icon(icon)
 
 
+def _web_token_query() -> str:
+    """The "?token=..." the running web page needs, or "" if unreadable.
+
+    The token is in an owner-only file the web page writes when it starts.
+    Without it the page just explains how to get in.
+    """
+    try:
+        token = settings.UI_TOKEN_PATH.read_text().strip()
+    except OSError:
+        return ""
+    return f"?token={token}" if token else ""
+
+
 def _settings_worker() -> None:
     """Open the settings screen.
 
@@ -372,13 +388,14 @@ def _settings_worker() -> None:
             [sys.executable, str(HERE / "settings_window.py")])
         return
     try:
-        urllib.request.urlopen(
-            CONFIG_UI_URL, timeout=CONFIG_UI_PROBE_TIMEOUT_SECONDS)
-        webbrowser.open(CONFIG_UI_URL)
-        return
+        # /ping needs no access token and reveals nothing.
+        urllib.request.urlopen(  # noqa: S310 (fixed http://127.0.0.1 URL)
+            CONFIG_UI_URL + "ping", timeout=CONFIG_UI_PROBE_TIMEOUT_SECONDS)
     except (OSError, http.client.HTTPException):
-        pass  # nothing listening yet: start our own below
-    subprocess.Popen([sys.executable, str(HERE / "config_ui.py")])
+        # Nothing listening yet: start our own, which opens the browser.
+        subprocess.Popen([sys.executable, str(HERE / "config_ui.py")])
+        return
+    webbrowser.open(CONFIG_UI_URL + _web_token_query())
 
 
 def action_settings(icon, item) -> None:

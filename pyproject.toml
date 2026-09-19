@@ -22,6 +22,17 @@ select = [
     "BLE",      # flake8-blind-except: every broad `except Exception` needs
                 # a `# noqa: BLE001` and a comment saying why
     "RUF100",   # flag `noqa` comments that no longer suppress anything
+    "S",        # flake8-bandit: security
+]
+ignore = [
+    # We run desktop tools (xrandr, xprop, xfconf-query, dbus-send, ...) by
+    # bare name because they live in different places on every distro. Every
+    # call passes an argument list, never a shell, so no argument can be
+    # reinterpreted as a command.
+    "S603", "S607",
+    # `random` only picks which photo to show; nothing here needs to be
+    # unpredictable to an attacker.
+    "S311",
 ]
 
 [tool.ruff.lint.pydocstyle]
@@ -29,7 +40,8 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 # Test methods are named for what they check; docstrings on each add noise.
-"tests/*" = ["D1"]
+# Tests use assert, and their tokens/keys are made-up constants.
+"tests/*" = ["D1", "S101", "S105", "S106"]
 
 [tool.mypy]
 # The packaged minimum is Python 3.8, but mypy itself needs 3.10+ as its

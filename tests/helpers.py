@@ -39,7 +39,10 @@ def serve(
         do_GET = do_POST = _dispatch  # noqa: N815 (http.server's names)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    # A short poll interval keeps server.shutdown() from waiting half a
+    # second per test.
+    threading.Thread(target=server.serve_forever,
+                     kwargs={"poll_interval": 0.02}, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_address[1]}"
 
 
