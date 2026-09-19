@@ -43,6 +43,7 @@ from typing import Any
 
 import desktops
 import immich_api
+import layout
 import settings
 
 logger = logging.getLogger(__name__)
@@ -182,21 +183,39 @@ def pick_image_batch(
     ]
 
 
-def classify_orientation(asset: dict) -> str:
-    """Classify an asset as portrait, landscape, square or unknown.
+def _displayed_size(asset: dict) -> tuple[int, int] | None:
+    """Width and height of an asset as displayed (EXIF rotation applied).
 
-    Accounts for EXIF rotation; returns one of those four words.
+    None if Immich has no dimensions for it.
     """
     exif = asset.get("exifInfo") or {}
     width, height = exif.get("exifImageWidth"), exif.get("exifImageHeight")
     if not width or not height:
-        return "unknown"
+        return None
     try:
         orientation = int(exif.get("orientation") or 1)
     except (TypeError, ValueError):
         orientation = 1
     if orientation in EXIF_QUARTER_TURN_ORIENTATIONS:
         width, height = height, width
+    return width, height
+
+
+def asset_aspect(asset: dict) -> float | None:
+    """Width/height ratio of an asset as displayed, or None if unknown."""
+    size = _displayed_size(asset)
+    return size[0] / size[1] if size else None
+
+
+def classify_orientation(asset: dict) -> str:
+    """Classify an asset as portrait, landscape, square or unknown.
+
+    Accounts for EXIF rotation; returns one of those four words.
+    """
+    size = _displayed_size(asset)
+    if size is None:
+        return "unknown"
+    width, height = size
     if height > width * ASPECT_RATIO_TOLERANCE:
         return "portrait"
     if width > height * ASPECT_RATIO_TOLERANCE:
@@ -303,6 +322,25 @@ def compose_pair(
                             right_width, target_height)
     right_x = left_width + gap + (right_width - right.width) // 2
     canvas.paste(right, (right_x, (target_height - right.height) // 2))
+    return canvas
+
+
+def compose_row(
+    photos: list[bytes], placements: list[layout.Placement],
+    target_width: int, target_height: int, background=(0, 0, 0),
+):
+    """Draw photos at planned positions on one canvas of the target size.
+
+    `placements` come from layout.plan_row(); each photo is fitted whole
+    inside its rectangle, so nothing is cropped.
+    """
+    from PIL import Image
+    canvas = Image.new("RGB", (target_width, target_height), background)
+    for data, place in zip(photos, placements):
+        image = _contain_resize(
+            _load_oriented(data), place.width, place.height)
+        canvas.paste(image, (place.x + (place.width - image.width) // 2,
+                             place.y + (place.height - image.height) // 2))
     return canvas
 
 
