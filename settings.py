@@ -6,6 +6,7 @@ they are stored by going through this module.
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import os
 import stat
@@ -53,7 +54,7 @@ def load_config() -> dict[str, Any]:
 
     Never fails: a missing or corrupt file yields the defaults.
     """
-    config = dict(DEFAULT_CONFIG)
+    config = copy.deepcopy(DEFAULT_CONFIG)
     with contextlib.suppress(json.JSONDecodeError, OSError):
         config.update(read_stored_config())
     return config
@@ -93,10 +94,9 @@ def load_state() -> dict[str, Any]:
 
     Falls back to the defaults if the state file is missing or unreadable.
     """
-    # FIXME: dict() is a shallow copy, so with no state file the returned
-    # "history" list is DEFAULT_STATE's own list and mutating it leaks into
-    # later calls in a long-lived process (the tray). Deep-copy instead.
-    state = dict(DEFAULT_STATE)
+    # Deep copy: callers mutate the nested "history" list, and a shallow
+    # copy would let that leak into DEFAULT_STATE and every later call.
+    state = copy.deepcopy(DEFAULT_STATE)
     if STATE_PATH.exists():
         with contextlib.suppress(json.JSONDecodeError, OSError):
             state.update(json.loads(STATE_PATH.read_text()))
