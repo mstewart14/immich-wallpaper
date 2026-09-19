@@ -54,9 +54,7 @@ EXT_BY_MIME = {
 
 DOWNLOAD_TIMEOUT_SECONDS = 60
 
-DEFAULT_INTERVAL_MINUTES = 5
 MIN_INTERVAL_SECONDS = 60
-DEFAULT_KEEP_COUNT = 3
 MIN_KEEP_COUNT = 2
 
 # How many candidates one /search/random call asks Immich for.
@@ -664,7 +662,8 @@ def main() -> None:
         return  # quiet no-op while paused
 
     interval_minutes = int(
-        config.get("interval_minutes", DEFAULT_INTERVAL_MINUTES))
+        config.get("interval_minutes",
+                   settings.DEFAULT_CONFIG["interval_minutes"]))
     interval_seconds = max(MIN_INTERVAL_SECONDS, interval_minutes * 60)
     seconds_since_last_run = time.time() - state.get("last_run", 0)
     if not force and seconds_since_last_run < interval_seconds:
@@ -701,7 +700,8 @@ def main() -> None:
         return
 
     keep_count = max(
-        MIN_KEEP_COUNT, int(config.get("keep_count", DEFAULT_KEEP_COUNT)))
+        MIN_KEEP_COUNT,
+        int(config.get("keep_count", settings.DEFAULT_CONFIG["keep_count"])))
     was_live = append_history(state, entry, keep_count)
     image_name = Path(entry["path"]).name
 
