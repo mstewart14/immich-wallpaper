@@ -47,6 +47,8 @@ SCREEN_COLOR_GREYED = (150, 150, 150, 255)
 # rotation is due (rotate.py applies the configured interval itself).
 POLL_INTERVAL_SECONDS = 20
 ROTATE_TIMEOUT_SECONDS = 120
+# Linux has a native settings window; other platforms use the web page.
+NATIVE_SETTINGS = sys.platform.startswith("linux")
 CONFIG_UI_URL = f"http://127.0.0.1:{settings.CONFIG_UI_PORT}/"
 CONFIG_UI_PROBE_TIMEOUT_SECONDS = 1
 
@@ -359,7 +361,16 @@ def action_forward(icon, item) -> None:
 
 
 def _settings_worker() -> None:
-    """Open the config UI, starting it first if it isn't already running."""
+    """Open the settings screen.
+
+    On Linux that is the native GTK window (running it again just raises
+    the window already open). Elsewhere GTK isn't practical to install, so
+    it is the web page, which is started first if it isn't already running.
+    """
+    if NATIVE_SETTINGS:
+        subprocess.Popen(
+            [sys.executable, str(HERE / "settings_window.py")])
+        return
     try:
         urllib.request.urlopen(
             CONFIG_UI_URL, timeout=CONFIG_UI_PROBE_TIMEOUT_SECONDS)

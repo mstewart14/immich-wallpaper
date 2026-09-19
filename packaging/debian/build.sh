@@ -13,7 +13,10 @@ mkdir -p "$PKG_DIR/DEBIAN" "$PKG_DIR/usr/share/immich-wallpaper/assets" \
          "$PKG_DIR/usr/bin" "$PKG_DIR/etc/xdg/autostart" \
          "$PKG_DIR/usr/share/icons/hicolor/256x256/apps"
 
-cp "$REPO_ROOT/config_ui.py" "$REPO_ROOT/index.html" "$REPO_ROOT/rotate.py" "$REPO_ROOT/tray_app.py" \
+# The web settings page (config_ui.py, index.html) is for platforms without
+# GTK and is deliberately not installed on Linux.
+cp "$REPO_ROOT/rotate.py" "$REPO_ROOT/tray_app.py" \
+   "$REPO_ROOT/settings_window.py" "$REPO_ROOT/settings_service.py" \
    "$REPO_ROOT/settings.py" "$REPO_ROOT/immich_api.py" "$REPO_ROOT/desktops.py" \
    "$REPO_ROOT/layout.py" "$REPO_ROOT/screens.py" \
    "$PKG_DIR/usr/share/immich-wallpaper/"
@@ -21,7 +24,7 @@ cp "$REPO_ROOT/assets/immich-flower.png" "$REPO_ROOT/assets/app-icon.png" \
    "$PKG_DIR/usr/share/immich-wallpaper/assets/"
 cp "$REPO_ROOT/assets/app-icon.png" "$PKG_DIR/usr/share/icons/hicolor/256x256/apps/immich-wallpaper.png"
 
-declare -A entry_points=([tray]=tray_app.py [config]=config_ui.py [rotate]=rotate.py)
+declare -A entry_points=([tray]=tray_app.py [config]=settings_window.py [rotate]=rotate.py)
 for name in "${!entry_points[@]}"; do
 cat > "$PKG_DIR/usr/bin/immich-wallpaper-$name" <<EOF
 #!/bin/sh
@@ -51,7 +54,7 @@ Section: utils
 Priority: optional
 Architecture: all
 Installed-Size: $INSTALLED_SIZE
-Depends: python3 (>= 3.8), python3-pil, python3-pystray, python3-gi, gir1.2-ayatanaappindicator3-0.1, x11-xserver-utils
+Depends: python3 (>= 3.8), python3-pil, python3-pystray, python3-gi, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1, x11-xserver-utils
 Recommends: kdialog | zenity
 Maintainer: mstewart14 <46582721+mstewart14@users.noreply.github.com>
 Homepage: https://github.com/mstewart14/immich-wallpaper
@@ -59,7 +62,7 @@ Description: Rotate desktop wallpaper from a self-hosted Immich library
  Pulls random photos from a configured Immich server (optionally filtered
  by album or person), sets them as the desktop wallpaper, and keeps a
  bounded number of recent images on disk with back/forward history. Ships
- a browser-based settings page and a system tray icon for status and
+ a native settings window and a system tray icon for status and
  quick controls. Supports KDE Plasma and XFCE.
 EOF
 

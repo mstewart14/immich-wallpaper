@@ -11,7 +11,7 @@ pkgdesc="Rotate desktop wallpaper from a self-hosted Immich library, with a tray
 arch=('any')
 url="https://github.com/mstewart14/immich-wallpaper"
 license=('MIT')
-depends=('python' 'python-pillow' 'python-gobject' 'libayatana-appindicator' 'python-pystray' 'xorg-xrandr' 'xorg-xprop')
+depends=('python' 'python-pillow' 'python-gobject' 'gtk3' 'libayatana-appindicator' 'python-pystray' 'xorg-xrandr' 'xorg-xprop')
 optdepends=('kdialog: save-a-copy dialog on KDE Plasma'
             'zenity: save-a-copy dialog on GTK-based desktops (e.g. XFCE)')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/mstewart14/immich-wallpaper/archive/refs/tags/v$pkgver.tar.gz")
@@ -20,7 +20,9 @@ sha256sums=('a4c4a2e9e0f5fab26af96e489ad864e14f7e6beeea0d095ff8b2d42afa457bb4')
 package() {
   cd "$srcdir/$pkgname-$pkgver"
 
-  install -Dm644 config_ui.py index.html rotate.py tray_app.py \
+  # The web settings page (config_ui.py, index.html) is for platforms without
+  # GTK and is deliberately not installed on Linux.
+  install -Dm644 rotate.py tray_app.py settings_window.py settings_service.py \
     settings.py immich_api.py desktops.py layout.py screens.py -t "$pkgdir/usr/share/immich-wallpaper/"
   install -Dm644 assets/immich-flower.png assets/app-icon.png -t "$pkgdir/usr/share/immich-wallpaper/assets/"
   install -Dm644 assets/app-icon.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/immich-wallpaper.png"
@@ -33,7 +35,7 @@ EOF
 
   install -Dm755 /dev/stdin "$pkgdir/usr/bin/immich-wallpaper-config" <<'EOF'
 #!/bin/sh
-exec python3 /usr/share/immich-wallpaper/config_ui.py "$@"
+exec python3 /usr/share/immich-wallpaper/settings_window.py "$@"
 EOF
 
   install -Dm755 /dev/stdin "$pkgdir/usr/bin/immich-wallpaper-rotate" <<'EOF'

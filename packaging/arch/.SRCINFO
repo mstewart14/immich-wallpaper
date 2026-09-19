@@ -8,6 +8,7 @@ pkgbase = immich-wallpaper
 	depends = python
 	depends = python-pillow
 	depends = python-gobject
+	depends = gtk3
 	depends = libayatana-appindicator
 	depends = python-pystray
 	depends = xorg-xrandr
