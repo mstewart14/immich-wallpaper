@@ -46,6 +46,12 @@ def serve(
     return server, f"http://127.0.0.1:{server.server_address[1]}"
 
 
+def stop(server: ThreadingHTTPServer) -> None:
+    """Shut a serve() server down and release its socket."""
+    server.shutdown()
+    server.server_close()
+
+
 def reply(
     request: BaseHTTPRequestHandler, status: int = 200, body: bytes = b"{}",
     content_type: str = "application/json", headers: dict | None = None,
