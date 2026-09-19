@@ -130,6 +130,16 @@ def current_entry(state: dict[str, Any] | None = None) -> dict | None:
     return None
 
 
+def entry_files(entry: dict[str, Any]) -> list[str]:
+    """Every image file a history entry owns, without duplicates.
+
+    An entry has a main `path` and, when it was built for several monitors,
+    an `images` mapping of monitor name to its own file.
+    """
+    paths = [entry["path"], *(entry.get("images") or {}).values()]
+    return list(dict.fromkeys(paths))
+
+
 def can_go_back(state: dict[str, Any] | None = None) -> bool:
     """Whether there is an older wallpaper in the history to step back to."""
     state = state or load_state()

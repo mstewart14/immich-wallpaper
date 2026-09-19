@@ -104,6 +104,22 @@ def load_required_config() -> dict[str, Any]:
     return config
 
 
+def apply_entry(entry: dict[str, Any]) -> bool:
+    """Put a history entry on the desktop. Returns True on success.
+
+    An entry built for several monitors sets each monitor's own image (and
+    leaves any other monitors alone) when the desktop can do that. In every
+    other case the entry's main image is set the ordinary way.
+    """
+    images = entry.get("images")
+    if images and desktops.supports_monitor_wallpapers():
+        present = {name: Path(path) for name, path in images.items()
+                   if Path(path).exists()}
+        if present:
+            return desktops.set_monitor_wallpapers(present)
+    return desktops.set_wallpaper(Path(entry["path"]))
+
+
 def navigate(direction: int) -> bool:
     """Apply the previous (-1) or next (+1) wallpaper from the history.
 
@@ -119,10 +135,9 @@ def navigate(direction: int) -> bool:
     if new_position < 0 or new_position >= len(history):
         return False
     entry = history[new_position]
-    path = Path(entry["path"])
-    if not path.exists():
+    if not all(Path(path).exists() for path in settings.entry_files(entry)):
         return False
-    entry["wallpaper_applied"] = desktops.set_wallpaper(path)
+    entry["wallpaper_applied"] = apply_entry(entry)
     state["position"] = new_position
     settings.save_state(state)
     return True
@@ -656,8 +671,9 @@ def append_history(
     history.append(entry)
     while len(history) > keep_count and history[0]["path"] != displayed_path:
         oldest = history.pop(0)
-        with contextlib.suppress(OSError):
-            Path(oldest["path"]).unlink()
+        for old_file in settings.entry_files(oldest):
+            with contextlib.suppress(OSError):
+                Path(old_file).unlink()
 
     if was_live:
         position = len(history) - 1
@@ -813,8 +829,7 @@ def main() -> None:
     image_name = Path(entry["path"]).name
 
     if was_live or force:
-        entry["wallpaper_applied"] = desktops.set_wallpaper(
-            Path(entry["path"]))
+        entry["wallpaper_applied"] = apply_entry(entry)
         if was_live is False:
             # --once always jumps to the new live edge.
             state["position"] = len(state["history"]) - 1
