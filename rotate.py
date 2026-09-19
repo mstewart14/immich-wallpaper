@@ -497,33 +497,42 @@ def _compose_pair_wallpaper(
     return canvas
 
 
-def _compose_single_with_overlays(
-    config: dict, asset: dict, screen_size: tuple[int, int] | None,
-    show_info: bool, show_date: bool,
+def _compose_single(
+    data: bytes, config: dict, asset: dict,
+    screen_size: tuple[int, int] | None, show_info: bool, show_date: bool,
 ):
-    """Canvas for one asset with caption and/or date overlays drawn on it."""
-    data, _ = download_asset_bytes(config, asset)
-    canvas = _load_oriented(data)
-    # Pre-letterbox onto the real screen size (when known) so the taskbar
-    # insets below -- measured in real screen pixels -- land in the same
-    # coordinate space as what's drawn here. Without this, a single image
-    # left at its own native resolution has no reliable correspondence to
-    # on-screen pixel positions.
-    if screen_size:
-        canvas = _letterbox_single(canvas, *screen_size)
-    insets = desktops.screen_insets(screen_size)
-    if show_info:
-        _draw_photo_caption(canvas, config, asset, 0, canvas.width,
-                            "left", insets)
-    if show_date:
-        draw_date_overlay(
-            canvas, extra_x=insets["left"], extra_top=insets["top"])
+    """Canvas for one photo: letterboxed to the screen, overlays drawn on.
+
+    Letterboxing onto the real screen size (when known) means the desktop's
+    own fill mode never matters -- some crop to fill, and they don't agree
+    -- and also puts the taskbar insets, measured in real screen pixels, in
+    the same coordinate space as what's drawn here.
+
+    Returns None if the photo can't be decoded (e.g. HEIC without a Pillow
+    plugin), so the caller can fall back to the original file.
+    """
+    try:
+        canvas = _load_oriented(data)
+        if screen_size:
+            canvas = _letterbox_single(canvas, *screen_size)
+        insets = desktops.screen_insets(screen_size)
+        if show_info:
+            _draw_photo_caption(canvas, config, asset, 0, canvas.width,
+                                "left", insets)
+        if show_date:
+            draw_date_overlay(
+                canvas, extra_x=insets["left"], extra_top=insets["top"])
+    except (ImportError, OSError, ValueError) as error:
+        logger.warning("Could not decode %s (%s); using the original file "
+                       "instead", asset.get("originalFileName"), error)
+        return None
     return canvas
 
 
-def _save_original_file(config: dict, asset: dict, stem: str) -> Path:
-    """Save `asset`'s original file untouched, keeping its extension."""
-    data, content_type = download_asset_bytes(config, asset)
+def _save_original_file(
+    asset: dict, data: bytes, content_type: str | None, stem: str,
+) -> Path:
+    """Save a photo's original bytes untouched, keeping its extension."""
     extension = Path(asset.get("originalFileName", "")).suffix.lower()
     if not extension or len(extension) > 6:
         extension = EXT_BY_MIME.get(
@@ -541,9 +550,10 @@ def build_wallpaper_entry(
 
     The entry holds kind, path, assets, size_bytes and created_at.
 
-    Two assets become a side-by-side pair; a single asset with any overlay
-    enabled is redrawn as a JPEG; otherwise the original file is saved
-    as-is.
+    Two assets become a side-by-side pair. A single photo is letterboxed to
+    the screen (and gets any overlays) as a JPEG. The original file is saved
+    as-is only when there is nothing to draw against -- the screen size is
+    unknown and no overlay is enabled -- or when it can't be decoded.
     """
     settings.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     # Timestamp plus random suffix: unique even across same-second calls.
@@ -551,20 +561,23 @@ def build_wallpaper_entry(
     show_info = bool(config.get("show_photo_info"))
     show_date = bool(config.get("show_date_overlay"))
 
+    original = None
     if len(assets) == 2 and screen_size:
         kind, chosen = "pair", assets
         canvas = _compose_pair_wallpaper(
             config, assets, screen_size, show_info, show_date)
-    elif show_info or show_date:
-        kind, chosen = "single", [assets[0]]
-        canvas = _compose_single_with_overlays(
-            config, assets[0], screen_size, show_info, show_date)
     else:
         kind, chosen = "single", [assets[0]]
+        # Downloaded once: the original bytes are kept for the fallback.
+        original = download_asset_bytes(config, assets[0])
         canvas = None
+        if screen_size or show_info or show_date:
+            canvas = _compose_single(
+                original[0], config, assets[0], screen_size,
+                show_info, show_date)
 
     if canvas is None:
-        path = _save_original_file(config, assets[0], stem)
+        path = _save_original_file(assets[0], *original, stem)
     else:
         path = settings.IMAGES_DIR / f"{stem}.jpg"
         canvas.save(path, "JPEG", quality=JPEG_QUALITY)

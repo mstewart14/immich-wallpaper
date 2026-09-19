@@ -109,8 +109,12 @@ album/person selection) is fetched with EXIF data. If the first pick is
 portrait-oriented and the screen resolution can be detected, a second
 portrait from the same batch is paired with it into one composite image
 sized exactly to your screen (via KDE's `screenGeometry()` scripting API,
-or `xrandr` on XFCE). Otherwise the photo is shown singly, letting the
-desktop's own wallpaper fill mode handle scaling.
+or `xrandr` on XFCE). Otherwise the photo is shown singly, letterboxed
+to your screen size (whole photo, black bars, never cropped) so it looks the
+same whatever fill mode the desktop applies by default. Only when the screen
+size can't be detected, or a file can't be decoded (e.g. HEIC without a
+Pillow plugin), is the original file used as-is and the desktop's own fill
+mode applies. "Save a copy" saves the wallpaper as displayed, bars included.
 
 ## Known issues
 
