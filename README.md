@@ -33,6 +33,14 @@ API for a random photo on each rotation and keeps a small rolling window
 - **Desktop support**: KDE Plasma (via D-Bus scripting — no QtWebEngine
   involved) and XFCE (via `xfconf-query`/`xrandr`). Desktop is
   auto-detected at runtime.
+- **Multiple screens** (Settings → Screens): with more than one monitor
+  you can show the *same photo* on every screen (each drawn at that
+  screen's own size), a *different photo* on each, or *one picture across
+  all screens* (photos side by side filling the whole width, never cropped).
+  You can also change only some screens and leave the others as you set
+  them, and allow more than two photos on a very wide screen. Supported on
+  KDE Plasma and XFCE, which set wallpapers per screen; see the notes under
+  Known issues.
 - **On-image overlays** (optional, off by default) — inspired by
   [Immich Kiosk](https://github.com/damongolding/immich-kiosk): a discreet
   caption per photo (people names, location, date taken, stacked top to
@@ -117,6 +125,24 @@ Pillow plugin), is the original file used as-is and the desktop's own fill
 mode applies. "Save a copy" saves the wallpaper as displayed, bars included.
 
 ## Known issues
+
+- **Multiple screens are new and lightly tested.** They were built and
+  tested against simulated monitors, and on KDE Plasma the per-screen
+  setter was checked on a real session with one monitor. Real multi-screen
+  behaviour on KDE, and the XFCE setter (checked against a recording fake
+  only), still need confirming on real hardware, so reports are welcome.
+  With one screen nothing changes.
+- **Spanned pictures ignore each monitor's real vertical position.** The
+  screens are laid side by side as one strip, with shorter screens centred,
+  so a photo across two screens of different heights may not line up
+  perfectly at the join.
+- **Overlay margins with several screens.** Photo info and the date use the
+  base margin only, not taskbar-aware margins, when more than one screen is
+  in use. The date appears on the primary screen only.
+- **Screens are identified by connector name** (for example `HDMI-A-1`), so
+  a selection survives unplugging and replugging, but renaming a connector
+  (for instance by moving a cable to a different port) means selecting it
+  again.
 
 - **`libayatana-appindicator is deprecated (please use
   libayatana-appindicator-glib in newly written code)`** — you may see this
