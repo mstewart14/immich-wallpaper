@@ -19,10 +19,14 @@ API for a random photo on each rotation and keeps a small rolling window
 
 ## Features
 
-- **Config UI** (`config_ui.py`) — a local web page (bind to `127.0.0.1`
-  only) for entering your Immich server URL/API key, picking albums and/or
-  people to pull from, and setting the rotation interval and how many
-  images to keep on disk.
+- **Settings window** (`settings_window.py`) — a native GTK window for
+  entering your Immich server URL/API key, picking albums and/or people to
+  pull from, and setting the rotation interval and how many images to keep
+  on disk. It runs as its own small process with no server and no open
+  port, and the API key sits in a masked field. On platforms where GTK
+  isn't practical to install (Windows, macOS) the same settings are
+  offered as a local web page instead (`config_ui.py`); it isn't
+  installed or started on Linux.
 - **Rotator** (`rotate.py`) — does the actual work: picks a random photo
   (or two portraits, paired), downloads it, sets it as the desktop
   wallpaper, and keeps a bounded back/forward history.
@@ -83,22 +87,22 @@ on Manjaro.
 
 ### Manual / from source
 
-Needs Python 3.8+, Pillow, pystray, PyGObject, an AppIndicator provider,
-and (on XFCE) `xrandr`. On Debian/Ubuntu:
+Needs Python 3.8+, Pillow, pystray, PyGObject with GTK 3, an AppIndicator
+provider, and `xrandr` (on every desktop but KDE). On Debian/Ubuntu:
 
 ```
-sudo apt install python3-pystray python3-pil python3-gi gir1.2-ayatanaappindicator3-0.1 x11-xserver-utils
+sudo apt install python3-pystray python3-pil python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 x11-xserver-utils
 python3 tray_app.py
 ```
 
 The tray app drives its own periodic rotation internally (no cron/systemd
 timer needed) — as long as it's running, it self-paces against the
-interval you set in the config UI.
+interval you set in the settings window.
 
 ## Setup
 
-1. Run the tray icon (or `python3 config_ui.py` directly) and open
-   `http://127.0.0.1:8877`.
+1. Run the tray icon and choose **Settings…** from its menu (or run
+   `immich-wallpaper-config`, or `python3 settings_window.py`).
 2. Enter your Immich server URL and an API key. Create the key under
    **Account Settings → API Keys** in Immich, and grant only:
    `asset.read`, `asset.download`, `album.read`, `person.read` — no
@@ -153,6 +157,46 @@ mode applies. "Save a copy" saves the wallpaper as displayed, bars included.
   `libayatana-appindicator-glib`, which also has no widely-packaged
   Python/GI binding yet, so there's nothing to switch to. Harmless; the
   tray icon works normally.
+
+## Security
+
+The app holds an API key for your Immich server and downloads files from
+it, so it is deliberately careful:
+
+- **No network server on Linux.** The settings screen is a native window,
+  not a web page, so there is no local port for a website or another user
+  to reach.
+- **Private storage.** The config (which holds the API key), the state, the
+  cached photos and the failure log are readable by you only (mode 0600,
+  directories 0700).
+- **A strict Immich client.** Server URLs must be plain `http(s)://`; a
+  redirect is followed only within the same host, so a server or proxy
+  can't bounce the API key elsewhere; replies are size-limited; ids put in
+  URLs are encoded as single path segments.
+- **Untrusted files.** Photos come from a remote server, so decoding
+  refuses "decompression bombs", any decoder failure falls back to the
+  original file, and the file name's extension is only trusted if it is
+  short and alphanumeric.
+- **The web settings page** (other platforms only) requires a per-run
+  access token, checks the `Host` and `Origin` headers, accepts only JSON
+  posts, never sends the API key to the browser, and serves a strict
+  Content-Security-Policy.
+
+Security linting (ruff's bandit rules) is part of the standard checks.
+
+## Development
+
+```
+python3 -m unittest discover -s tests -t .   # the test suite (~13 s)
+ruff check .                                 # style, docstrings, security
+mypy *.py                                    # types
+```
+
+The tests run against a throwaway `HOME`, so they never touch your real
+config, state or wallpaper, and the GTK tests skip themselves on a machine
+without a display. To add support for another desktop, write its
+screen-size and set-wallpaper functions and register a `DesktopBackend` in
+`desktops.py`.
 
 ## License
 
