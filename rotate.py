@@ -34,9 +34,11 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from typing import Callable, Optional
 
 CONFIG_PATH = Path.home() / ".config" / "immich-wallpaper" / "config.json"
 CACHE_DIR = Path.home() / ".cache" / "immich-wallpaper"
@@ -585,18 +587,6 @@ def ensure_display_env():
             os.environ["DISPLAY"] = ":" + os.path.basename(sockets[0])[1:]
 
 
-def detect_desktop():
-    xdg = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
-    if "kde" in xdg:
-        return "kde"
-    if "xfce" in xdg:
-        return "xfce"
-    for proc, de in (("plasmashell", "kde"), ("xfce4-session", "xfce")):
-        if subprocess.run(["pgrep", "-x", proc], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-            return de
-    return None
-
-
 def _kde_eval(script):
     ensure_dbus_env()
     return subprocess.run(
@@ -624,15 +614,6 @@ def get_screen_size_xfce():
     m = re.search(r"connected primary (\d+)x(\d+)\+", result.stdout) or \
         re.search(r"connected (\d+)x(\d+)\+", result.stdout)
     return (int(m.group(1)), int(m.group(2))) if m else None
-
-
-def get_screen_size():
-    de = detect_desktop()
-    if de == "kde":
-        return get_screen_size_kde()
-    if de == "xfce":
-        return get_screen_size_xfce()
-    return None
 
 
 def set_wallpaper_kde(image_path):
@@ -694,14 +675,67 @@ def set_wallpaper_xfce(image_path):
     return ok
 
 
+@dataclass(frozen=True)
+class DesktopBackend:
+    """One supported desktop. To add a desktop: write its screen_size /
+    set_wallpaper functions above and append a DesktopBackend to BACKENDS.
+
+    xdg_names: lowercase substrings matched against $XDG_CURRENT_DESKTOP.
+    process:   process name to pgrep for when the env var doesn't match
+               (e.g. when launched from a systemd unit with a bare env).
+    screen_size():        (width, height) or None if it can't be determined.
+    set_wallpaper(path):  True on success, False (after logging) on failure.
+    """
+    name: str
+    xdg_names: tuple
+    process: Optional[str]
+    screen_size: Callable[[], Optional[tuple]]
+    set_wallpaper: Callable[[Path], bool]
+
+
+# Order matters: earlier entries win when several would match.
+BACKENDS = [
+    DesktopBackend("kde", ("kde",), "plasmashell", get_screen_size_kde, set_wallpaper_kde),
+    DesktopBackend("xfce", ("xfce",), "xfce4-session", get_screen_size_xfce, set_wallpaper_xfce),
+]
+
+
+def _process_running(name):
+    return subprocess.run(["pgrep", "-x", name], stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode == 0
+
+
+def current_backend():
+    """The DesktopBackend for the running session, or None if unsupported.
+    Checks $XDG_CURRENT_DESKTOP across all backends first, and only then falls
+    back to looking for each backend's session process."""
+    xdg = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+    for backend in BACKENDS:
+        if any(n in xdg for n in backend.xdg_names):
+            return backend
+    for backend in BACKENDS:
+        if backend.process and _process_running(backend.process):
+            return backend
+    return None
+
+
+def detect_desktop():
+    backend = current_backend()
+    return backend.name if backend else None
+
+
+def get_screen_size():
+    backend = current_backend()
+    return backend.screen_size() if backend else None
+
+
 def set_wallpaper(image_path):
-    de = detect_desktop()
-    if de == "kde":
-        return set_wallpaper_kde(image_path)
-    if de == "xfce":
-        return set_wallpaper_xfce(image_path)
-    log("Could not detect a supported desktop environment (looked for KDE Plasma / XFCE).")
-    return False
+    backend = current_backend()
+    if not backend:
+        supported = " / ".join(b.name for b in BACKENDS)
+        log(f"Could not detect a supported desktop environment (looked for: {supported}).")
+        return False
+    return backend.set_wallpaper(image_path)
 
 
 # --------------------------------------------------------------------------
