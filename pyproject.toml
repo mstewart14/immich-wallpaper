@@ -1,0 +1,26 @@
+# Tooling configuration only -- this project is a set of scripts, not an
+# installable Python package (see packaging/ for the .deb and PKGBUILD).
+#
+# Lint with:  ruff check .
+
+[tool.ruff]
+line-length = 79
+# Matches the "python3 (>= 3.8)" dependency in packaging/debian/build.sh.
+target-version = "py38"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle: PEP 8 errors and warnings
+    "F",        # pyflakes: unused/undefined names
+    "N",        # pep8-naming
+    "D",        # pydocstyle: PEP 257 docstrings
+    "UP",       # pyupgrade
+    "B",        # flake8-bugbear
+    "SIM",      # flake8-simplify
+    "BLE",      # flake8-blind-except: every broad `except Exception` needs
+                # a `# noqa: BLE001` and a comment saying why
+    "RUF100",   # flag `noqa` comments that no longer suppress anything
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
