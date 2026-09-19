@@ -37,6 +37,7 @@ import urllib.error
 import uuid
 from datetime import datetime
 from io import BytesIO
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,15 @@ DOWNLOAD_TIMEOUT_SECONDS = 60
 
 MIN_INTERVAL_SECONDS = 60
 MIN_KEEP_COUNT = 2
+
+LOG_FORMAT = "[%(asctime)s] %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+# Failures are also appended to settings.LOG_PATH, since the tray discards
+# this program's output; the file is capped so it can't grow without bound.
+LOG_MAX_BYTES = 256 * 1024
+LOG_BACKUP_COUNT = 1
+# Longest response-header value written to the log.
+LOG_HEADER_VALUE_LIMIT = 120
 
 # How many candidates one /search/random call asks Immich for.
 RANDOM_BATCH_SIZE = 12
@@ -614,9 +624,53 @@ def append_history(
 # --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
-def _record_failure(state: dict[str, Any], message: str) -> None:
-    """Log `message` and persist it as the last error (shown by the tray)."""
+def _configure_logging() -> None:
+    """Send log output to stdout, and failures also to the log file.
+
+    The file handler is best-effort: if the log file can't be created,
+    rotation carries on with stdout only.
+    """
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+    try:
+        settings.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            settings.LOG_PATH, maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT, delay=True)
+    except OSError:
+        pass
+    else:
+        file_handler.setLevel(logging.ERROR)
+        handlers.append(file_handler)
+    logging.basicConfig(
+        level=logging.INFO, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT,
+        handlers=handlers)
+
+
+def _http_error_details(error: urllib.error.HTTPError) -> str:
+    """Describe a failed HTTP request for the log: URL and response headers.
+
+    The headers show which layer answered -- e.g. a reverse proxy's `Server`
+    or `Via` versus Immich's own -- which the status code alone can't.
+    """
+    headers = "; ".join(
+        f"{name}: {value[:LOG_HEADER_VALUE_LIMIT]}"
+        for name, value in error.headers.items()
+        if name.lower() != "set-cookie")
+    return (f"HTTP {error.code} from {error.geturl()} -- "
+            f"response headers: {headers}")
+
+
+def _record_failure(
+    state: dict[str, Any], message: str, details: str | None = None,
+) -> None:
+    """Log `message` and persist it as the last error (shown by the tray).
+
+    `details` is written to the log only: it can be long, and the state's
+    message is what the tray shows.
+    """
     logger.error("%s", message)
+    if details:
+        logger.error("  details: %s", details)
     state["last_error"] = message
     state["last_error_at"] = time.time()
     settings.save_state(state)
@@ -647,9 +701,7 @@ def _run_control_command(args: list[str]) -> bool:
 
 def main() -> None:
     """Command-line entry point: run a control command or one rotation."""
-    logging.basicConfig(
-        stream=sys.stdout, level=logging.INFO,
-        format="[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    _configure_logging()
     args = sys.argv[1:]
     if _run_control_command(args):
         return
@@ -678,7 +730,8 @@ def main() -> None:
     except urllib.error.HTTPError as error:
         body = error.read().decode(errors="replace")[:200]
         _record_failure(
-            state, f"Immich request failed: HTTP {error.code} {body}")
+            state, f"Immich request failed: HTTP {error.code} {body}",
+            details=_http_error_details(error))
         return
     except urllib.error.URLError as error:
         _record_failure(
@@ -696,7 +749,10 @@ def main() -> None:
     except Exception as error:  # noqa: BLE001
         # Any download/decode/compose failure is recorded for the tray to
         # show rather than crashing the periodic run.
-        _record_failure(state, f"Download/compose failed: {error}")
+        details = (_http_error_details(error)
+                   if isinstance(error, urllib.error.HTTPError) else None)
+        _record_failure(
+            state, f"Download/compose failed: {error}", details=details)
         return
 
     keep_count = max(

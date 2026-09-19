@@ -19,6 +19,7 @@ CONFIG_PATH = CONFIG_DIR / "config.json"
 CACHE_DIR = Path.home() / ".cache" / APP_NAME
 IMAGES_DIR = CACHE_DIR / "images"
 STATE_PATH = CACHE_DIR / "state.json"
+LOG_PATH = CACHE_DIR / "rotate.log"
 
 # Port the config UI listens on by default; the tray probes it to decide
 # whether to reuse a running UI or start a new one.
