@@ -188,7 +188,7 @@ def image_text(item=None) -> str:
     if entry.get("kind") == "pair":
         label = " + ".join(names)
     elif entry.get("kind") == "multi":
-        label = f"{len(names)} photos across screens"
+        label = f"{len(names)} photos"
     else:
         label = names[0] if names else Path(entry["path"]).name
     state = settings.load_state()

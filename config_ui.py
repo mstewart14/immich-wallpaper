@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import desktops
 import immich_api
 import settings
 
@@ -47,6 +48,8 @@ PEOPLE_PAGE_SIZE = 250
 MAX_PEOPLE_PAGES = 40
 
 PERSON_MATCH_MODES = ("any", "all", "both")
+MULTI_MONITOR_MODES = ("same", "different", "span")
+PHOTOS_PER_SCREEN_RANGE = (1, 6)
 WHOLE_NUMBER_KEYS = ("interval_minutes", "keep_count")
 LIST_KEYS = ("albums", "people")
 FLAG_KEYS = ("show_photo_info", "show_date_overlay")
@@ -118,6 +121,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_static_asset(*STATIC_ASSETS[path])
         elif path == "/api/config":
             self._send_json(settings.load_config())
+        elif path == "/api/monitors":
+            self._handle_monitors()
         elif path == "/api/person-thumb":
             self._handle_person_thumbnail()
         else:
@@ -171,6 +176,19 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "max-age=3600")
         self.end_headers()
         self.wfile.write(data)
+
+    def _handle_monitors(self) -> None:
+        """List the connected monitors and whether each can be set alone."""
+        monitors = desktops.get_monitors()
+        self._send_json({
+            "ok": True,
+            "monitors": [
+                {"name": monitor.name, "x": monitor.x, "y": monitor.y,
+                 "width": monitor.width, "height": monitor.height,
+                 "primary": monitor.primary}
+                for monitor in monitors],
+            "per_monitor": desktops.supports_monitor_wallpapers(),
+        })
 
     def _handle_test(self, body: dict[str, Any]) -> None:
         """Check that the server is reachable and the API key is accepted."""
@@ -290,6 +308,21 @@ class Handler(BaseHTTPRequestHandler):
                 config[key] = body[key]
         if body.get("person_match") in PERSON_MATCH_MODES:
             config["person_match"] = body["person_match"]
+        if body.get("multi_monitor_mode") in MULTI_MONITOR_MODES:
+            config["multi_monitor_mode"] = body["multi_monitor_mode"]
+        if isinstance(body.get("monitors"), list):
+            config["monitors"] = [
+                str(name).strip() for name in body["monitors"]
+                if isinstance(name, str) and name.strip()]
+        if "max_photos_per_screen" in body:
+            try:
+                low, high = PHOTOS_PER_SCREEN_RANGE
+                config["max_photos_per_screen"] = min(
+                    high, max(low, int(body["max_photos_per_screen"])))
+            except (TypeError, ValueError):
+                message = "max_photos_per_screen must be a whole number"
+                self._send_json({"ok": False, "error": message}, 400)
+                return
         for key in FLAG_KEYS:
             if key in body:
                 config[key] = bool(body[key])

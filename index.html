@@ -162,6 +162,36 @@
     <p class="hint">Inspired by Immich Kiosk's overlays. Baked into the image at each rotation (this is a static wallpaper, not a live page), so the date updates whenever a new photo rotates in, not by the second.</p>
   </section>
 
+  <section class="card">
+    <h2>Screens</h2>
+    <div id="screens-note" class="hint"></div>
+    <div id="multi-options">
+      <label>When you have more than one screen</label>
+      <div class="radio-row">
+        <label class="radio-opt">
+          <input type="radio" name="multi-mode" value="same" checked>
+          <span><strong>Same photo</strong> on every screen &mdash; each screen gets its own copy, sized to fit it</span>
+        </label>
+        <label class="radio-opt">
+          <input type="radio" name="multi-mode" value="different">
+          <span><strong>Different photos</strong> &mdash; every screen gets its own</span>
+        </label>
+        <label class="radio-opt">
+          <input type="radio" name="multi-mode" value="span">
+          <span><strong>One picture across all screens</strong> &mdash; photos side by side, filling the width</span>
+        </label>
+      </div>
+
+      <label>Change these screens</label>
+      <div id="monitor-list" class="radio-row"></div>
+      <p class="hint">Leave all unticked to change every screen. Tick some to change only those &mdash; the others keep whatever wallpaper you set yourself.</p>
+    </div>
+
+    <label for="photos-per-screen">Most photos on one screen</label>
+    <input type="number" id="photos-per-screen" min="1" max="6" value="2" style="max-width:6rem">
+    <p class="hint">1 never pairs photos. 2 puts two portraits side by side on a wide screen (the default). More fills a very wide screen with several portraits.</p>
+  </section>
+
   <div class="save-bar">
     <button id="btn-save" style="width:100%">Save configuration</button>
     <div id="save-status" class="status"></div>
@@ -279,6 +309,9 @@ $('btn-save').addEventListener('click', async () => {
     person_match: personMatch,
     show_photo_info: $('show-photo-info').checked,
     show_date_overlay: $('show-date-overlay').checked,
+    multi_monitor_mode: document.querySelector('input[name="multi-mode"]:checked').value,
+    monitors: [...document.querySelectorAll('#monitor-list input:checked')].map(i => i.value),
+    max_photos_per_screen: parseInt($('photos-per-screen').value, 10) || 2,
   };
   el.textContent = 'Saving…'; el.className = 'status';
   const r = await api('/api/save', body);
@@ -302,7 +335,45 @@ $('btn-save').addEventListener('click', async () => {
   if (matchRadio) matchRadio.checked = true;
   $('show-photo-info').checked = !!cfg.show_photo_info;
   $('show-date-overlay').checked = !!cfg.show_date_overlay;
+  $('photos-per-screen').value = cfg.max_photos_per_screen || 2;
+  const modeRadio = document.querySelector(`input[name="multi-mode"][value="${cfg.multi_monitor_mode || 'same'}"]`);
+  if (modeRadio) modeRadio.checked = true;
+  await loadScreens(cfg.monitors || []);
 })();
+
+// Detected screens. Screens chosen earlier but not connected right now are
+// still listed (and stay ticked) so saving can't silently forget them.
+async function loadScreens(chosen) {
+  let info = {monitors: [], per_monitor: false};
+  try { info = await (await fetch('/api/monitors')).json(); } catch (e) { /* keep defaults */ }
+  const list = $('monitor-list'), note = $('screens-note');
+  list.innerHTML = '';
+  const several = info.monitors.length > 1;
+  const usable = several && info.per_monitor;
+  const present = new Set(info.monitors.map(m => m.name));
+  const rows = info.monitors.map(m => ({
+    name: m.name, present: true,
+    text: `${m.name} — ${m.width}×${m.height}${m.primary ? ' (primary)' : ''}`,
+  }));
+  for (const name of chosen) if (!present.has(name)) rows.push({name, present: false, text: `${name} — not connected`});
+  for (const row of rows) {
+    const label = document.createElement('label');
+    label.className = 'radio-opt';
+    const box = document.createElement('input');
+    box.type = 'checkbox'; box.value = row.name; box.checked = chosen.includes(row.name);
+    box.disabled = row.present && !usable;   // a stale, unplugged screen can always be unticked
+    const span = document.createElement('span');
+    span.textContent = row.text;
+    label.append(box, span);
+    list.append(label);
+  }
+  $('multi-options').style.opacity = usable ? '1' : '.55';
+  for (const radio of document.querySelectorAll('input[name="multi-mode"]')) radio.disabled = !usable;
+  if (info.monitors.length === 0) note.textContent = 'Could not detect your screens, so every screen is treated as one.';
+  else if (!several) note.textContent = 'One screen detected, so the choices below about several screens do not apply yet.';
+  else if (!info.per_monitor) note.textContent = 'This desktop cannot set screens one by one, so every screen shows the same picture.';
+  else note.textContent = `${info.monitors.length} screens detected.`;
+}
 </script>
 </body>
 </html>
