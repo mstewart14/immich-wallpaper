@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""
-Pulls photos from Immich (filtered by the albums/people chosen in the
-config UI) and sets the desktop wallpaper. Two portrait photos are paired
-side-by-side into a single composite when the screen resolution can be
-detected; landscape/square photos are shown singly. Keeps a bounded
-history of recent wallpapers on disk (oldest deleted as new ones arrive)
-so the tray app can step back/forward through what it's shown.
+"""Rotate the desktop wallpaper with photos pulled from Immich.
+
+Photos are filtered by the albums/people chosen in the config UI. Two
+portrait photos are paired side-by-side into a single composite when the
+screen resolution can be detected; landscape/square photos are shown
+singly. A bounded history of recent wallpapers is kept on disk (oldest
+deleted as new ones arrive) so the tray app can step back/forward through
+what it has shown.
 
 Meant to be triggered repeatedly (e.g. every 15-30s) by the tray app; it
 self-paces against config.json's interval_minutes via a state file, so
@@ -13,7 +14,8 @@ callers can invoke it often without worrying about over-rotating.
 
 Desktop support: auto-detects KDE Plasma (via D-Bus scripting, no
 QtWebEngine involved) and XFCE (via xfconf-query / xrandr). Only Pillow is
-a non-stdlib dependency, needed for the portrait-pairing composite.
+a non-stdlib dependency, needed for the portrait-pairing composite; it is
+imported lazily so the control commands work without it.
 
 Usage:
     python3 rotate.py             # normal run: no-ops if not due yet
@@ -22,6 +24,9 @@ Usage:
     python3 rotate.py --resume
     python3 rotate.py --status
 """
+from __future__ import annotations
+
+import contextlib
 import functools
 import glob
 import json
@@ -34,11 +39,12 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any
 
 CONFIG_PATH = Path.home() / ".config" / "immich-wallpaper" / "config.json"
 CACHE_DIR = Path.home() / ".cache" / "immich-wallpaper"
@@ -51,61 +57,96 @@ EXT_BY_MIME = {
     "image/bmp": ".bmp", "image/tiff": ".tiff",
 }
 
+API_TIMEOUT_SECONDS = 30
+DOWNLOAD_TIMEOUT_SECONDS = 60
 
-def log(msg):
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+DEFAULT_INTERVAL_MINUTES = 5
+MIN_INTERVAL_SECONDS = 60
+DEFAULT_KEEP_COUNT = 3
+MIN_KEEP_COUNT = 2
+
+# How many candidates one /search/random call asks Immich for.
+RANDOM_BATCH_SIZE = 12
+
+# Pixel gap between the two photos of a side-by-side portrait pair.
+PAIR_GAP_PX = 6
+JPEG_QUALITY = 92
+
+# EXIF orientation values that rotate the image a quarter turn, swapping
+# its stored width and height.
+EXIF_QUARTER_TURN_ORIENTATIONS = (5, 6, 7, 8)
+# A photo counts as portrait/landscape only if one side is at least this
+# much longer than the other; anything closer is treated as square.
+ASPECT_RATIO_TOLERANCE = 1.05
+
+
+def log(message: str) -> None:
+    """Print `message` to stdout with a timestamp."""
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}", flush=True)
 
 
 # --------------------------------------------------------------------------
 # Config / state
 # --------------------------------------------------------------------------
-def load_config():
+def load_config() -> dict[str, Any]:
+    """Read config.json, exiting with a message if it is missing/incomplete."""
     if not CONFIG_PATH.exists():
-        log(f"No config at {CONFIG_PATH}. Run the config UI and save a configuration first.")
+        log(f"No config at {CONFIG_PATH}. "
+            "Run the config UI and save a configuration first.")
         sys.exit(1)
-    cfg = json.loads(CONFIG_PATH.read_text())
-    if not cfg.get("immich_url") or not cfg.get("api_key"):
-        log("Config is missing immich_url or api_key. Run the config UI to finish setup.")
+    config = json.loads(CONFIG_PATH.read_text())
+    if not config.get("immich_url") or not config.get("api_key"):
+        log("Config is missing immich_url or api_key. "
+            "Run the config UI to finish setup.")
         sys.exit(1)
-    return cfg
+    return config
 
 
+# `history` runs oldest -> newest; each entry has kind, path, assets[],
+# size_bytes and created_at. `position` is the index into `history` that is
+# currently applied to the desktop (-1 when there is no history yet).
 DEFAULT_STATE = {
     "last_run": 0,
     "last_success": None,
     "last_error": None,
     "last_error_at": None,
     "paused": False,
-    "history": [],   # oldest -> newest; each entry: kind, path, assets[], size_bytes, created_at
-    "position": -1,  # index into history currently applied to the desktop
+    "history": [],
+    "position": -1,
 }
 
 
-def load_state():
+def load_state() -> dict[str, Any]:
+    """Load the persisted rotation state.
+
+    Falls back to the defaults if the state file is missing or unreadable.
+    """
     state = dict(DEFAULT_STATE)
     if STATE_PATH.exists():
-        try:
+        with contextlib.suppress(json.JSONDecodeError, OSError):
             state.update(json.loads(STATE_PATH.read_text()))
-        except (json.JSONDecodeError, OSError):
-            pass
     return state
 
 
-def save_state(state):
+def save_state(state: dict[str, Any]) -> None:
+    """Persist `state` atomically (write a temp file, then rename it)."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = STATE_PATH.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state))
-    tmp.replace(STATE_PATH)
+    temp_path = STATE_PATH.with_suffix(".json.tmp")
+    temp_path.write_text(json.dumps(state))
+    temp_path.replace(STATE_PATH)
 
 
-def set_paused(paused):
+def set_paused(paused: bool) -> dict[str, Any]:
+    """Pause or resume rotation and return the updated state."""
     state = load_state()
     state["paused"] = paused
     save_state(state)
     return state
 
 
-def current_entry(state=None):
+def current_entry(state: dict[str, Any] | None = None) -> dict | None:
+    """Return the history entry applied to the desktop, or None."""
     state = state or load_state()
     history = state.get("history") or []
     position = state.get("position", -1)
@@ -114,33 +155,39 @@ def current_entry(state=None):
     return None
 
 
-def can_go_back(state=None):
+def can_go_back(state: dict[str, Any] | None = None) -> bool:
+    """Whether there is an older wallpaper in the history to step back to."""
     state = state or load_state()
     return (state.get("position") or 0) > 0
 
 
-def can_go_forward(state=None):
+def can_go_forward(state: dict[str, Any] | None = None) -> bool:
+    """Whether there is a newer wallpaper in the history to step forward to."""
     state = state or load_state()
     history = state.get("history") or []
     return state.get("position", -1) < len(history) - 1
 
 
-def navigate(direction):
-    """direction: -1 for back, +1 for forward. Returns True if it moved."""
+def navigate(direction: int) -> bool:
+    """Apply the previous (-1) or next (+1) wallpaper from the history.
+
+    Returns True if the wallpaper moved, False if there was nowhere to go
+    or the target image is no longer on disk.
+    """
     state = load_state()
     history = state.get("history") or []
     if not history:
         return False
     position = state.get("position", len(history) - 1)
-    new_pos = position + direction
-    if new_pos < 0 or new_pos >= len(history):
+    new_position = position + direction
+    if new_position < 0 or new_position >= len(history):
         return False
-    entry = history[new_pos]
+    entry = history[new_position]
     path = Path(entry["path"])
     if not path.exists():
         return False
     entry["wallpaper_applied"] = set_wallpaper(path)
-    state["position"] = new_pos
+    state["position"] = new_position
     save_state(state)
     return True
 
@@ -148,45 +195,67 @@ def navigate(direction):
 # --------------------------------------------------------------------------
 # Immich API
 # --------------------------------------------------------------------------
-def immich_post(base_url, api_key, path, body):
-    url = base_url.rstrip("/") + "/api" + path
-    data = json.dumps(body).encode()
-    req = urllib.request.Request(
-        url, data=data, method="POST",
+def _api_url(base_url: str, path: str) -> str:
+    return base_url.rstrip("/") + "/api" + path
+
+
+def immich_post(base_url: str, api_key: str, path: str, body: dict) -> Any:
+    """POST `body` as JSON to an Immich API `path`.
+
+    Returns the parsed reply, or None if the reply is empty.
+    """
+    request = urllib.request.Request(
+        _api_url(base_url, path), data=json.dumps(body).encode(),
+        method="POST",
         headers={"x-api-key": api_key, "Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        raw = resp.read()
+    with urllib.request.urlopen(request, timeout=API_TIMEOUT_SECONDS) as reply:
+        raw = reply.read()
         return json.loads(raw) if raw else None
 
 
-def immich_get_bytes(base_url, api_key, path):
-    url = base_url.rstrip("/") + "/api" + path
-    req = urllib.request.Request(url, headers={"x-api-key": api_key})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return resp.read(), resp.getheader("Content-Type")
+def immich_get_bytes(
+    base_url: str, api_key: str, path: str,
+) -> tuple[bytes, str | None]:
+    """GET an Immich API `path`; return (body bytes, Content-Type header)."""
+    request = urllib.request.Request(
+        _api_url(base_url, path), headers={"x-api-key": api_key})
+    with urllib.request.urlopen(
+        request, timeout=DOWNLOAD_TIMEOUT_SECONDS,
+    ) as reply:
+        return reply.read(), reply.getheader("Content-Type")
 
 
-def immich_get_json(base_url, api_key, path):
-    url = base_url.rstrip("/") + "/api" + path
-    req = urllib.request.Request(url, headers={"x-api-key": api_key})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        raw = resp.read()
+def immich_get_json(base_url: str, api_key: str, path: str) -> Any:
+    """GET an Immich API `path`; return the parsed JSON (None if empty)."""
+    request = urllib.request.Request(
+        _api_url(base_url, path), headers={"x-api-key": api_key})
+    with urllib.request.urlopen(request, timeout=API_TIMEOUT_SECONDS) as reply:
+        raw = reply.read()
         return json.loads(raw) if raw else None
 
 
-def get_asset_details(cfg, asset_id):
-    """Full asset record (exifInfo + people), used only for the on-image
-    caption -- /search/random's per-asset payload isn't reliably this
-    complete, so this is one extra small GET per chosen photo."""
+def get_asset_details(config: dict, asset_id: str) -> dict | None:
+    """Fetch the full asset record (exifInfo + people), or None on failure.
+
+    Used only for the on-image caption: /search/random's per-asset payload
+    isn't reliably this complete, so this is one extra small GET per chosen
+    photo.
+    """
     try:
-        return immich_get_json(cfg["immich_url"], cfg["api_key"], f"/assets/{asset_id}")
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, KeyError):
+        return immich_get_json(
+            config["immich_url"], config["api_key"], f"/assets/{asset_id}")
+    except (urllib.error.URLError, json.JSONDecodeError, KeyError):
+        # URLError also covers HTTPError.
         return None
 
 
-def pick_image_batch(cfg, size=12):
-    """One /search/random call, filtered by album/person selections, asking
+def pick_image_batch(
+    config: dict, size: int = RANDOM_BATCH_SIZE,
+) -> list[dict]:
+    """Ask Immich for `size` random image assets matching the config.
+
+    One /search/random call, filtered by album/person selections, asking
     for exif so orientation can be judged without downloading anything.
 
     Immich's personIds filter is an AND (asset must contain every listed
@@ -195,107 +264,153 @@ def pick_image_batch(cfg, size=12):
                 many rotations you get an OR across the whole group.
       "all"  -- every call requires all of them together (the raw AND).
       "both" -- each call is a coin flip between the two, so you get a
-                genuine blend of solo and together photos over time."""
-    body = {"size": size, "withExif": True}
-    album_ids = [a["id"] for a in cfg.get("albums", [])]
-    people = cfg.get("people", [])
+                genuine blend of solo and together photos over time.
+    """
+    body: dict[str, Any] = {"size": size, "withExif": True}
+    album_ids = [album["id"] for album in config.get("albums", [])]
+    people = config.get("people", [])
     if album_ids:
         body["albumIds"] = album_ids
     if people:
-        mode = cfg.get("person_match", "any")
-        want_all = mode == "all" or (mode == "both" and random.random() < 0.5)
-        if want_all or len(people) == 1:
-            body["personIds"] = [p["id"] for p in people]
+        person_match = config.get("person_match", "any")
+        require_all = person_match == "all" or (
+            person_match == "both" and random.random() < 0.5)
+        if require_all or len(people) == 1:
+            body["personIds"] = [person["id"] for person in people]
         else:
             body["personIds"] = [random.choice(people)["id"]]
 
-    assets = immich_post(cfg["immich_url"], cfg["api_key"], "/search/random", body)
+    assets = immich_post(
+        config["immich_url"], config["api_key"], "/search/random", body)
     if not assets:
         return []
-    return [a for a in assets if (a.get("originalMimeType") or "").startswith("image/")]
+    return [
+        asset for asset in assets
+        if (asset.get("originalMimeType") or "").startswith("image/")
+    ]
 
 
-def classify_orientation(asset):
+def classify_orientation(asset: dict) -> str:
+    """Classify an asset as portrait, landscape, square or unknown.
+
+    Accounts for EXIF rotation; returns one of those four words.
+    """
     exif = asset.get("exifInfo") or {}
-    w, h = exif.get("exifImageWidth"), exif.get("exifImageHeight")
-    if not w or not h:
+    width, height = exif.get("exifImageWidth"), exif.get("exifImageHeight")
+    if not width or not height:
         return "unknown"
     try:
-        if int(exif.get("orientation") or 1) in (5, 6, 7, 8):
-            w, h = h, w
+        orientation = int(exif.get("orientation") or 1)
     except (TypeError, ValueError):
-        pass
-    if h > w * 1.05:
+        orientation = 1
+    if orientation in EXIF_QUARTER_TURN_ORIENTATIONS:
+        width, height = height, width
+    if height > width * ASPECT_RATIO_TOLERANCE:
         return "portrait"
-    if w > h * 1.05:
+    if width > height * ASPECT_RATIO_TOLERANCE:
         return "landscape"
     return "square"
 
 
-def choose_assets_for_rotation(cfg, allow_pair):
-    batch = pick_image_batch(cfg)
+def choose_assets_for_rotation(config: dict, allow_pair: bool) -> list[dict]:
+    """Pick the asset(s) for one rotation.
+
+    Two portraits when `allow_pair` and a second portrait is available,
+    otherwise a single asset. Returns an empty list if Immich had no
+    matching images.
+    """
+    batch = pick_image_batch(config)
     if not batch:
         return []
     random.shuffle(batch)
     first = batch[0]
     if allow_pair and classify_orientation(first) == "portrait":
         for candidate in batch[1:]:
-            if candidate["id"] != first["id"] and classify_orientation(candidate) == "portrait":
+            if (candidate["id"] != first["id"]
+                    and classify_orientation(candidate) == "portrait"):
                 return [first, candidate]
     return [first]
 
 
-def download_asset_bytes(cfg, asset):
-    return immich_get_bytes(cfg["immich_url"], cfg["api_key"], f"/assets/{asset['id']}/original")
+def download_asset_bytes(
+    config: dict, asset: dict,
+) -> tuple[bytes, str | None]:
+    """Download the original file for `asset`; see immich_get_bytes()."""
+    return immich_get_bytes(
+        config["immich_url"], config["api_key"],
+        f"/assets/{asset['id']}/original")
 
 
-def asset_meta(cfg, asset):
+def asset_meta(config: dict, asset: dict) -> dict[str, Any]:
+    """Return the subset of an asset's fields kept in the history entry."""
     return {
         "id": asset["id"],
         "original_filename": asset.get("originalFileName"),
-        "web_url": cfg["immich_url"].rstrip("/") + f"/photos/{asset['id']}",
+        "web_url": config["immich_url"].rstrip("/") + f"/photos/{asset['id']}",
     }
 
 
 # --------------------------------------------------------------------------
 # Image composition (only used for the 2-portrait side-by-side layout)
 # --------------------------------------------------------------------------
-def _load_oriented(data):
+def _load_oriented(data: bytes):
+    """Decode image `data` to an upright RGB PIL image.
+
+    EXIF rotation is applied.
+    """
     from PIL import Image, ImageOps
-    img = Image.open(BytesIO(data))
-    img = ImageOps.exif_transpose(img)
-    return img.convert("RGB")
+    image = Image.open(BytesIO(data))
+    image = ImageOps.exif_transpose(image)
+    return image.convert("RGB")
 
 
-def _contain_resize(img, target_w, target_h):
-    """Scales to fit entirely within target_w x target_h, no cropping --
-    the caller's canvas shows through as letterbox bars around it."""
+def _contain_resize(image, target_width: int, target_height: int):
+    """Scale `image` to fit entirely within the target size.
+
+    No cropping -- the caller's canvas shows through as letterbox bars
+    around it.
+    """
     from PIL import Image
-    scale = min(target_w / img.width, target_h / img.height)
-    new_w, new_h = max(1, round(img.width * scale)), max(1, round(img.height * scale))
-    return img.resize((new_w, new_h), Image.LANCZOS)
+    scale = min(target_width / image.width, target_height / image.height)
+    new_width = max(1, round(image.width * scale))
+    new_height = max(1, round(image.height * scale))
+    return image.resize((new_width, new_height), Image.LANCZOS)
 
 
-def _letterbox_single(img, target_w, target_h, bg=(0, 0, 0)):
+def _letterbox_single(
+    image, target_width: int, target_height: int, background=(0, 0, 0),
+):
+    """Center `image` on a canvas of the target size (see _contain_resize)."""
     from PIL import Image
-    canvas = Image.new("RGB", (target_w, target_h), bg)
-    fitted = _contain_resize(img, target_w, target_h)
-    canvas.paste(fitted, ((target_w - fitted.width) // 2, (target_h - fitted.height) // 2))
+    canvas = Image.new("RGB", (target_width, target_height), background)
+    fitted = _contain_resize(image, target_width, target_height)
+    canvas.paste(fitted, ((target_width - fitted.width) // 2,
+                          (target_height - fitted.height) // 2))
     return canvas
 
 
-def compose_pair(data_a, data_b, target_w, target_h, gap=6, bg=(0, 0, 0)):
+def compose_pair(
+    data_left: bytes, data_right: bytes, target_width: int,
+    target_height: int, gap: int = PAIR_GAP_PX, background=(0, 0, 0),
+):
+    """Place two photos side by side on one canvas of the target size.
+
+    Each photo is letterboxed inside its own half.
+    """
     from PIL import Image
-    canvas = Image.new("RGB", (target_w, target_h), bg)
-    half_w = (target_w - gap) // 2
-    right_w = target_w - gap - half_w
+    canvas = Image.new("RGB", (target_width, target_height), background)
+    left_width = (target_width - gap) // 2
+    right_width = target_width - gap - left_width
 
-    left_img = _contain_resize(_load_oriented(data_a), half_w, target_h)
-    canvas.paste(left_img, ((half_w - left_img.width) // 2, (target_h - left_img.height) // 2))
+    left = _contain_resize(_load_oriented(data_left),
+                           left_width, target_height)
+    canvas.paste(left, ((left_width - left.width) // 2,
+                        (target_height - left.height) // 2))
 
-    right_img = _contain_resize(_load_oriented(data_b), right_w, target_h)
-    right_x = half_w + gap + (right_w - right_img.width) // 2
-    canvas.paste(right_img, (right_x, (target_h - right_img.height) // 2))
+    right = _contain_resize(_load_oriented(data_right),
+                            right_width, target_height)
+    right_x = left_width + gap + (right_width - right.width) // 2
+    canvas.paste(right, (right_x, (target_height - right.height) // 2))
     return canvas
 
 
@@ -313,8 +428,24 @@ _FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
 ]
 
+# One-pixel offsets in all eight directions, used to fake a text outline.
+_OUTLINE_OFFSETS = (
+    (-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1),
+)
 
-def _load_font(size):
+# Distance kept clear of every screen edge, on top of any taskbar/panel.
+EDGE_MARGIN_INCHES = 0.5
+FALLBACK_DPI = 96.0
+# A detected panel wider than this fraction of the screen is assumed to be
+# a bad measurement (e.g. a multi-monitor work area) and ignored.
+MAX_INSET_FRACTION = 0.4
+
+
+def _load_font(size: int):
+    """Load the first available known TrueType font at `size` pixels.
+
+    Falls back to Pillow's built-in font if none of them can be opened.
+    """
     from PIL import ImageFont
     for path in _FONT_CANDIDATES:
         if os.path.exists(path):
@@ -328,78 +459,104 @@ def _load_font(size):
         return ImageFont.load_default()  # older Pillow: fixed small size
 
 
-def _draw_outlined_text(draw, xy, text, font, fill=(190, 190, 190), outline=(0, 0, 0)):
-    x, y = xy
-    for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)):
-        draw.text((x + dx, y + dy), text, font=font, fill=outline)
+def _draw_outlined_text(
+    draw, position: tuple[int, int], text: str, font,
+    fill=(190, 190, 190), outline=(0, 0, 0),
+) -> None:
+    """Draw `text` at `position` in `fill` with a one-pixel `outline`."""
+    x, y = position
+    for offset_x, offset_y in _OUTLINE_OFFSETS:
+        draw.text((x + offset_x, y + offset_y), text, font=font, fill=outline)
     draw.text((x, y), text, font=font, fill=fill)
 
 
-def _format_taken_date(iso_str):
-    if not iso_str:
+def _format_taken_date(iso_timestamp: str | None) -> str | None:
+    """Format an ISO-8601 timestamp as e.g. "Aug 29, 2022", or None."""
+    if not iso_timestamp:
         return None
     try:
-        return datetime.fromisoformat(iso_str.replace("Z", "+00:00")).strftime("%b %-d, %Y")
+        taken = datetime.fromisoformat(iso_timestamp.replace("Z", "+00:00"))
+        return taken.strftime("%b %-d, %Y")
     except (ValueError, TypeError):
         return None
 
 
-def photo_caption_lines(details):
-    """[people names, location, date taken] from a full asset record, top
-    to bottom, skipping whichever parts are missing. Empty list if there's
-    nothing to show."""
+def photo_caption_lines(details: dict | None) -> list[str]:
+    """Build caption lines from a full asset record, top to bottom.
+
+    The lines are people names, location and date taken. Missing parts are
+    skipped; the list is empty if there is nothing to show.
+    """
     if not details:
         return []
     exif = details.get("exifInfo") or {}
     lines = []
-    people = [p.get("name") for p in (details.get("people") or []) if p.get("name") and not p.get("isHidden")]
-    if people:
-        lines.append(", ".join(people))
-    location = ", ".join(x for x in (exif.get("city"), exif.get("state") or exif.get("country")) if x)
+    visible_names = [
+        person["name"] for person in (details.get("people") or [])
+        if person.get("name") and not person.get("isHidden")
+    ]
+    if visible_names:
+        lines.append(", ".join(visible_names))
+    place_parts = (exif.get("city"), exif.get("state") or exif.get("country"))
+    location = ", ".join(part for part in place_parts if part)
     if location:
         lines.append(location)
-    date = _format_taken_date(exif.get("dateTimeOriginal"))
-    if date:
-        lines.append(date)
+    date_taken = _format_taken_date(exif.get("dateTimeOriginal"))
+    if date_taken:
+        lines.append(date_taken)
     return lines
 
 
-EDGE_MARGIN_INCHES = 0.5
-
-
 @functools.lru_cache(maxsize=1)
-def get_screen_dpi():
-    """Best-effort physical DPI via xrandr's per-monitor mm dimensions
-    (works via XWayland on a Wayland KDE session too). Falls back to the
+def get_screen_dpi() -> float:
+    """Best-effort physical DPI via xrandr's per-monitor mm dimensions.
+
+    Works via XWayland on a Wayland KDE session too. Falls back to the
     common 96 DPI default if detection fails for any reason. Cached --
     doesn't change within a single rotation, and each rotate.py invocation
-    is a fresh short-lived process anyway."""
+    is a fresh short-lived process anyway.
+    """
     try:
-        result = subprocess.run(["xrandr", "--query"], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(
+            ["xrandr", "--query"], capture_output=True, text=True, timeout=5)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return 96.0
+        return FALLBACK_DPI
     if result.returncode != 0:
-        return 96.0
-    m = re.search(r"connected primary (\d+)x(\d+)\+\d+\+\d+.*?(\d+)mm x (\d+)mm", result.stdout) or \
-        re.search(r"connected (\d+)x(\d+)\+\d+\+\d+.*?(\d+)mm x (\d+)mm", result.stdout)
-    if not m:
-        return 96.0
-    px_w, px_h, mm_w, mm_h = (int(g) for g in m.groups())
-    if mm_w <= 0 or mm_h <= 0:
-        return 96.0
-    return ((px_w / (mm_w / 25.4)) + (px_h / (mm_h / 25.4))) / 2
+        return FALLBACK_DPI
+    match = (
+        re.search(r"connected primary (\d+)x(\d+)\+\d+\+\d+.*?"
+                  r"(\d+)mm x (\d+)mm", result.stdout)
+        or re.search(r"connected (\d+)x(\d+)\+\d+\+\d+.*?"
+                     r"(\d+)mm x (\d+)mm", result.stdout)
+    )
+    if not match:
+        return FALLBACK_DPI
+    width_px, height_px, width_mm, height_mm = map(int, match.groups())
+    if width_mm <= 0 or height_mm <= 0:
+        return FALLBACK_DPI
+    horizontal_dpi = width_px / (width_mm / 25.4)
+    vertical_dpi = height_px / (height_mm / 25.4)
+    return (horizontal_dpi + vertical_dpi) / 2
 
 
-def edge_margin_px():
+def edge_margin_px() -> int:
+    """Return the base margin kept clear of screen edges, in pixels."""
     return round(get_screen_dpi() * EDGE_MARGIN_INCHES)
 
 
-def draw_caption(canvas, lines, region_x0, region_x1, region_bottom, corner="left", extra_x=0, extra_bottom=0):
-    """Draws caption `lines` bottom-anchored inside [region_x0, region_x1]
-    of `canvas` (a region rather than the whole canvas so pair captions
-    stay against their own half), right-aligned if corner == "right".
-    extra_x/extra_bottom pad past a detected taskbar/panel on top of the
-    base EDGE_MARGIN_INCHES -- see screen_insets()."""
+def draw_caption(
+    canvas, lines: list[str], region_left: int, region_right: int,
+    region_bottom: int, corner: str = "left", extra_x: int = 0,
+    extra_bottom: int = 0,
+) -> None:
+    """Draw caption `lines` bottom-anchored inside a horizontal region.
+
+    The region [region_left, region_right] is separate from the whole
+    canvas so pair captions stay against their own half. Lines are
+    right-aligned if `corner` is "right". `extra_x`/`extra_bottom` pad past
+    a detected taskbar/panel on top of the base EDGE_MARGIN_INCHES -- see
+    screen_insets().
+    """
     if not lines:
         return
     from PIL import ImageDraw
@@ -408,161 +565,250 @@ def draw_caption(canvas, lines, region_x0, region_x1, region_bottom, corner="lef
     font = _load_font(font_size)
     margin = edge_margin_px()
     line_gap = max(2, font_size // 6)
-    measured = [draw.textbbox((0, 0), line, font=font) for line in lines]
-    total_h = sum(b[3] - b[1] for b in measured) + line_gap * (len(lines) - 1)
-    y = region_bottom - (margin + extra_bottom) - total_h
-    for line, bbox in zip(lines, measured):
-        w = bbox[2] - bbox[0]
-        x = (region_x1 - (margin + extra_x) - w) if corner == "right" else (region_x0 + margin + extra_x)
+    measured = [(line, draw.textbbox((0, 0), line, font=font))
+                for line in lines]
+    total_height = (
+        sum(box[3] - box[1] for _, box in measured)
+        + line_gap * (len(lines) - 1)
+    )
+    y = region_bottom - (margin + extra_bottom) - total_height
+    for line, box in measured:
+        text_width = box[2] - box[0]
+        if corner == "right":
+            x = region_right - (margin + extra_x) - text_width
+        else:
+            x = region_left + margin + extra_x
         _draw_outlined_text(draw, (x, y), line, font)
-        y += (bbox[3] - bbox[1]) + line_gap
+        y += (box[3] - box[1]) + line_gap
 
 
-def draw_date_overlay(canvas, extra_x=0, extra_top=0):
-    """Today's date, top-left. Baked in at rotation time -- see module note
-    above on why this isn't a live clock. extra_x/extra_top pad past a
-    detected taskbar/panel on top of the base EDGE_MARGIN_INCHES -- see
-    screen_insets()."""
+def draw_date_overlay(canvas, extra_x: int = 0, extra_top: int = 0) -> None:
+    """Draw today's date, top-left.
+
+    Baked in at rotation time -- see the overlay note above on why this
+    isn't a live clock. `extra_x`/`extra_top` pad past a detected
+    taskbar/panel on top of the base EDGE_MARGIN_INCHES -- see
+    screen_insets().
+    """
     from PIL import ImageDraw
     draw = ImageDraw.Draw(canvas)
     font_size = max(15, round(canvas.height * 0.026))
     font = _load_font(font_size)
     margin = edge_margin_px()
-    _draw_outlined_text(draw, (margin + extra_x, margin + extra_top), time.strftime("%A, %B %-d"), font)
+    _draw_outlined_text(
+        draw, (margin + extra_x, margin + extra_top),
+        time.strftime("%A, %B %-d"), font)
 
 
-def get_work_area():
-    """Best-effort usable-desktop-area query via the EWMH _NET_WORKAREA root
-    window property -- works via XWayland even on a Wayland KDE session,
-    and natively under XFCE's X11. Returns (x, y, width, height) or None
-    if xprop is missing, fails, or the output doesn't parse."""
+def get_work_area() -> tuple[int, int, int, int] | None:
+    """Best-effort usable-desktop-area query, as (x, y, width, height).
+
+    Uses the EWMH _NET_WORKAREA root window property -- works via XWayland
+    even on a Wayland KDE session, and natively under XFCE's X11. Returns
+    None if xprop is missing, fails, or the output doesn't parse.
+    """
     try:
-        result = subprocess.run(["xprop", "-root", "_NET_WORKAREA"],
-                                 capture_output=True, text=True, timeout=5)
+        result = subprocess.run(
+            ["xprop", "-root", "_NET_WORKAREA"],
+            capture_output=True, text=True, timeout=5)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
     if result.returncode != 0:
         return None
-    m = re.search(r"=\s*(-?\d+),\s*(-?\d+),\s*(\d+),\s*(\d+)", result.stdout)
-    return tuple(int(g) for g in m.groups()) if m else None
+    match = re.search(r"=\s*(-?\d+),\s*(-?\d+),\s*(\d+),\s*(\d+)",
+                      result.stdout)
+    return tuple(int(group) for group in match.groups()) if match else None
 
 
-def screen_insets(screen_size):
-    """How many pixels on each screen edge are covered by a taskbar/panel,
-    derived from comparing the usable work area to the full screen size.
+def screen_insets(screen_size: tuple[int, int] | None) -> dict[str, int]:
+    """How many pixels on each screen edge are covered by a taskbar/panel.
+
+    Derived from comparing the usable work area to the full screen size.
     All-zero (today's flat-margin behaviour) if detection fails or looks
-    nonsensical -- e.g. a multi-monitor workarea union wider than this one
-    screen, which we'd rather ignore than risk a broken layout from."""
-    zero = {"left": 0, "top": 0, "right": 0, "bottom": 0}
+    nonsensical -- e.g. a multi-monitor work area union wider than this one
+    screen, which we'd rather ignore than risk a broken layout from.
+    """
+    no_insets = {"left": 0, "top": 0, "right": 0, "bottom": 0}
     if not screen_size:
-        return zero
-    work = get_work_area()
-    if not work:
-        return zero
-    wx, wy, ww, wh = work
-    sw, sh = screen_size
-    left, top = max(0, wx), max(0, wy)
-    right, bottom = max(0, sw - (wx + ww)), max(0, sh - (wy + wh))
-    if left > sw * 0.4 or right > sw * 0.4 or top > sh * 0.4 or bottom > sh * 0.4:
-        return zero
-    return {"left": left, "top": top, "right": right, "bottom": bottom}
+        return no_insets
+    work_area = get_work_area()
+    if not work_area:
+        return no_insets
+    work_x, work_y, work_width, work_height = work_area
+    screen_width, screen_height = screen_size
+    insets = {
+        "left": max(0, work_x),
+        "top": max(0, work_y),
+        "right": max(0, screen_width - (work_x + work_width)),
+        "bottom": max(0, screen_height - (work_y + work_height)),
+    }
+    if (insets["left"] > screen_width * MAX_INSET_FRACTION
+            or insets["right"] > screen_width * MAX_INSET_FRACTION
+            or insets["top"] > screen_height * MAX_INSET_FRACTION
+            or insets["bottom"] > screen_height * MAX_INSET_FRACTION):
+        return no_insets
+    return insets
 
 
-def build_wallpaper_entry(cfg, assets, screen_size):
+# --------------------------------------------------------------------------
+# Building the wallpaper file
+# --------------------------------------------------------------------------
+def _draw_photo_caption(
+    canvas, config: dict, asset: dict, region_left: int, region_right: int,
+    corner: str, insets: dict[str, int],
+) -> None:
+    """Draw `asset`'s caption in the bottom `corner` of a canvas region.
+
+    Padded to stay clear of the taskbar on that side.
+    """
+    lines = photo_caption_lines(get_asset_details(config, asset["id"]))
+    edge_inset = insets["right"] if corner == "right" else insets["left"]
+    draw_caption(canvas, lines, region_left, region_right, canvas.height,
+                 corner=corner, extra_x=edge_inset,
+                 extra_bottom=insets["bottom"])
+
+
+def _compose_pair_wallpaper(
+    config: dict, assets: list[dict], screen_size: tuple[int, int],
+    show_info: bool, show_date: bool,
+):
+    """Side-by-side canvas for two portrait assets, with optional overlays."""
+    insets = screen_insets(screen_size)
+    data_left, _ = download_asset_bytes(config, assets[0])
+    data_right, _ = download_asset_bytes(config, assets[1])
+    canvas = compose_pair(data_left, data_right, *screen_size)
+    if show_info:
+        screen_width = screen_size[0]
+        left_width = (screen_width - PAIR_GAP_PX) // 2
+        _draw_photo_caption(canvas, config, assets[0], 0, left_width,
+                            "left", insets)
+        _draw_photo_caption(canvas, config, assets[1],
+                            left_width + PAIR_GAP_PX, screen_width,
+                            "right", insets)
+    if show_date:
+        draw_date_overlay(
+            canvas, extra_x=insets["left"], extra_top=insets["top"])
+    return canvas
+
+
+def _compose_single_with_overlays(
+    config: dict, asset: dict, screen_size: tuple[int, int] | None,
+    show_info: bool, show_date: bool,
+):
+    """Canvas for one asset with caption and/or date overlays drawn on it."""
+    data, _ = download_asset_bytes(config, asset)
+    canvas = _load_oriented(data)
+    # Pre-letterbox onto the real screen size (when known) so the taskbar
+    # insets below -- measured in real screen pixels -- land in the same
+    # coordinate space as what's drawn here. Without this, a single image
+    # left at its own native resolution has no reliable correspondence to
+    # on-screen pixel positions.
+    if screen_size:
+        canvas = _letterbox_single(canvas, *screen_size)
+    insets = screen_insets(screen_size)
+    if show_info:
+        _draw_photo_caption(canvas, config, asset, 0, canvas.width,
+                            "left", insets)
+    if show_date:
+        draw_date_overlay(
+            canvas, extra_x=insets["left"], extra_top=insets["top"])
+    return canvas
+
+
+def _save_original_file(config: dict, asset: dict, stem: str) -> Path:
+    """Save `asset`'s original file untouched, keeping its extension."""
+    data, content_type = download_asset_bytes(config, asset)
+    extension = Path(asset.get("originalFileName", "")).suffix.lower()
+    if not extension or len(extension) > 6:
+        extension = EXT_BY_MIME.get(
+            asset.get("originalMimeType"),
+            EXT_BY_MIME.get(content_type, ".jpg"))
+    path = IMAGES_DIR / f"{stem}{extension}"
+    path.write_bytes(data)
+    return path
+
+
+def build_wallpaper_entry(
+    config: dict, assets: list[dict], screen_size: tuple[int, int] | None,
+) -> dict[str, Any]:
+    """Download/compose the wallpaper for `assets` as a history entry.
+
+    The entry holds kind, path, assets, size_bytes and created_at.
+
+    Two assets become a side-by-side pair; a single asset with any overlay
+    enabled is redrawn as a JPEG; otherwise the original file is saved
+    as-is.
+    """
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    stem = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"  # unique even across same-second calls
-    show_info = bool(cfg.get("show_photo_info"))
-    show_date = bool(cfg.get("show_date_overlay"))
+    # Timestamp plus random suffix: unique even across same-second calls.
+    stem = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    show_info = bool(config.get("show_photo_info"))
+    show_date = bool(config.get("show_date_overlay"))
 
     if len(assets) == 2 and screen_size:
-        insets = screen_insets(screen_size)
-        data_a, _ = download_asset_bytes(cfg, assets[0])
-        data_b, _ = download_asset_bytes(cfg, assets[1])
-        canvas = compose_pair(data_a, data_b, *screen_size)
-        if show_info:
-            gap, half_w = 6, (screen_size[0] - 6) // 2
-            draw_caption(canvas, photo_caption_lines(get_asset_details(cfg, assets[0]["id"])),
-                         0, half_w, screen_size[1], corner="left",
-                         extra_x=insets["left"], extra_bottom=insets["bottom"])
-            draw_caption(canvas, photo_caption_lines(get_asset_details(cfg, assets[1]["id"])),
-                         half_w + gap, screen_size[0], screen_size[1], corner="right",
-                         extra_x=insets["right"], extra_bottom=insets["bottom"])
-        if show_date:
-            draw_date_overlay(canvas, extra_x=insets["left"], extra_top=insets["top"])
-        path = IMAGES_DIR / f"{stem}.jpg"
-        canvas.save(path, "JPEG", quality=92)
-        kind = "pair"
-        chosen = assets
+        kind, chosen = "pair", assets
+        canvas = _compose_pair_wallpaper(
+            config, assets, screen_size, show_info, show_date)
     elif show_info or show_date:
-        asset = assets[0]
-        data, _ = download_asset_bytes(cfg, asset)
-        canvas = _load_oriented(data)
-        # Pre-letterbox onto the real screen size (when known) so the
-        # taskbar insets below -- measured in real screen pixels -- land in
-        # the same coordinate space as what's drawn here. Without this, a
-        # single image left at its own native resolution has no reliable
-        # correspondence to on-screen pixel positions.
-        if screen_size:
-            canvas = _letterbox_single(canvas, *screen_size)
-        insets = screen_insets(screen_size)
-        if show_info:
-            draw_caption(canvas, photo_caption_lines(get_asset_details(cfg, asset["id"])),
-                         0, canvas.width, canvas.height, corner="left",
-                         extra_x=insets["left"], extra_bottom=insets["bottom"])
-        if show_date:
-            draw_date_overlay(canvas, extra_x=insets["left"], extra_top=insets["top"])
-        path = IMAGES_DIR / f"{stem}.jpg"
-        canvas.save(path, "JPEG", quality=92)
-        kind = "single"
-        chosen = [asset]
+        kind, chosen = "single", [assets[0]]
+        canvas = _compose_single_with_overlays(
+            config, assets[0], screen_size, show_info, show_date)
     else:
-        asset = assets[0]
-        data, ctype = download_asset_bytes(cfg, asset)
-        ext = Path(asset.get("originalFileName", "")).suffix.lower()
-        if not ext or len(ext) > 6:
-            ext = EXT_BY_MIME.get(asset.get("originalMimeType"), EXT_BY_MIME.get(ctype, ".jpg"))
-        path = IMAGES_DIR / f"{stem}{ext}"
-        path.write_bytes(data)
-        kind = "single"
-        chosen = [asset]
+        kind, chosen = "single", [assets[0]]
+        canvas = None
+
+    if canvas is None:
+        path = _save_original_file(config, assets[0], stem)
+    else:
+        path = IMAGES_DIR / f"{stem}.jpg"
+        canvas.save(path, "JPEG", quality=JPEG_QUALITY)
 
     return {
         "kind": kind,
         "path": str(path),
-        "assets": [asset_meta(cfg, a) for a in chosen],
+        "assets": [asset_meta(config, asset) for asset in chosen],
         "size_bytes": path.stat().st_size,
         "created_at": time.time(),
     }
 
 
-def append_history(state, entry, keep_count):
-    """Adds entry, trims from the oldest end past keep_count, and keeps
-    `position` pointing at the same logical spot (or the new live edge if
-    it was already there). Returns True if the caller was at the live edge
-    (i.e. this rotation should actually be applied to the desktop).
+def append_history(
+    state: dict[str, Any], entry: dict[str, Any], keep_count: int,
+) -> bool:
+    """Add `entry` to the history and trim the oldest past `keep_count`.
+
+    Keeps `position` pointing at the same logical spot (or the new live
+    edge if it was already there). Returns True if the caller was at the
+    live edge (i.e. this rotation should actually be applied to the
+    desktop).
 
     Whatever's currently applied to the desktop is never deleted, even if
     it's outside the keep_count window -- e.g. the user has navigated back
     to an older photo and a background rotation happens while they're
     looking at it. keep_count is a soft bound in that case (briefly +1)
-    rather than risk pointing the desktop at a file we just unlinked."""
+    rather than risk pointing the desktop at a file we just unlinked.
+    """
     history = state.get("history") or []
     position = state.get("position", -1)
     was_live = position == -1 or position == len(history) - 1
-    displayed_path = history[position]["path"] if 0 <= position < len(history) else None
+    if 0 <= position < len(history):
+        displayed_path = history[position]["path"]
+    else:
+        displayed_path = None
 
     history.append(entry)
     while len(history) > keep_count and history[0]["path"] != displayed_path:
-        old = history.pop(0)
-        try:
-            Path(old["path"]).unlink()
-        except OSError:
-            pass
+        oldest = history.pop(0)
+        with contextlib.suppress(OSError):
+            Path(oldest["path"]).unlink()
 
     if was_live:
         position = len(history) - 1
     else:
-        position = next((i for i, e in enumerate(history) if e["path"] == displayed_path), len(history) - 1)
+        position = next(
+            (index for index, item in enumerate(history)
+             if item["path"] == displayed_path),
+            len(history) - 1)
 
     state["history"] = history
     state["position"] = position
@@ -572,22 +818,30 @@ def append_history(state, entry, keep_count):
 # --------------------------------------------------------------------------
 # Desktop environment adapters
 # --------------------------------------------------------------------------
-def ensure_dbus_env():
+def ensure_dbus_env() -> None:
+    """Point DBUS_SESSION_BUS_ADDRESS at the user's session bus if unset.
+
+    Needed when launched from e.g. a systemd unit with a bare environment.
+    """
     if "DBUS_SESSION_BUS_ADDRESS" not in os.environ:
-        runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        runtime_dir = os.environ.get(
+            "XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
         bus_path = f"{runtime_dir}/bus"
         if os.path.exists(bus_path):
             os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus_path}"
 
 
-def ensure_display_env():
+def ensure_display_env() -> None:
+    """Point DISPLAY at the first X11 socket if unset (see ensure_dbus_env)."""
     if "DISPLAY" not in os.environ:
         sockets = sorted(glob.glob("/tmp/.X11-unix/X*"))
         if sockets:
-            os.environ["DISPLAY"] = ":" + os.path.basename(sockets[0])[1:]
+            display_number = os.path.basename(sockets[0])[1:]
+            os.environ["DISPLAY"] = ":" + display_number
 
 
-def _kde_eval(script):
+def _run_plasma_script(script: str) -> subprocess.CompletedProcess:
+    """Run a Plasma desktop-scripting `script` in the running plasmashell."""
     ensure_dbus_env()
     return subprocess.run(
         ["dbus-send", "--session", "--print-reply",
@@ -597,26 +851,34 @@ def _kde_eval(script):
     )
 
 
-def get_screen_size_kde():
-    result = _kde_eval("print(screenGeometry(0).width + 'x' + screenGeometry(0).height);")
+def get_screen_size_kde() -> tuple[int, int] | None:
+    """Primary screen size as (width, height) via Plasma, or None."""
+    result = _run_plasma_script(
+        "print(screenGeometry(0).width + 'x' + screenGeometry(0).height);")
     if result.returncode != 0:
         return None
-    m = re.search(r'string "(\d+)x(\d+)"', result.stdout)
-    return (int(m.group(1)), int(m.group(2))) if m else None
+    match = re.search(r'string "(\d+)x(\d+)"', result.stdout)
+    return (int(match.group(1)), int(match.group(2))) if match else None
 
 
-def get_screen_size_xfce():
-    result = subprocess.run(["xrandr", "--query"], capture_output=True, text=True)
+def get_screen_size_xfce() -> tuple[int, int] | None:
+    """Primary screen size as (width, height) via xrandr, or None."""
+    result = subprocess.run(
+        ["xrandr", "--query"], capture_output=True, text=True)
     if result.returncode != 0:
         return None
     # Prefer the monitor xrandr marks "primary"; fall back to the first
     # connected+active one otherwise (e.g. "eDP-1 connected 1920x1080+0+0").
-    m = re.search(r"connected primary (\d+)x(\d+)\+", result.stdout) or \
-        re.search(r"connected (\d+)x(\d+)\+", result.stdout)
-    return (int(m.group(1)), int(m.group(2))) if m else None
+    match = (re.search(r"connected primary (\d+)x(\d+)\+", result.stdout)
+             or re.search(r"connected (\d+)x(\d+)\+", result.stdout))
+    return (int(match.group(1)), int(match.group(2))) if match else None
 
 
-def set_wallpaper_kde(image_path):
+def set_wallpaper_kde(image_path: Path | str) -> bool:
+    """Set `image_path` as the wallpaper on every Plasma desktop.
+
+    Returns True on success; logs and returns False on failure.
+    """
     # Toggling the plugin away and back (even when it's already org.kde.image)
     # forces Plasma to tear down and recreate the wallpaper QML item. Without
     # this, writeConfig() alone updates the stored config correctly but the
@@ -634,7 +896,7 @@ for (i = 0; i < allDesktops.length; i++) {{
     d.writeConfig("FillMode", 1);
 }}
 '''
-    result = _kde_eval(script)
+    result = _run_plasma_script(script)
     if result.returncode != 0:
         log(f"KDE wallpaper set failed: {result.stderr.strip()}")
         return False
@@ -644,74 +906,105 @@ for (i = 0; i < allDesktops.length; i++) {{
     return True
 
 
-def set_wallpaper_xfce(image_path):
+def set_wallpaper_xfce(image_path: Path | str) -> bool:
+    """Set `image_path` as the wallpaper on every XFCE monitor/workspace.
+
+    Returns True if every property was set; logs and returns False on
+    failure.
+    """
     ensure_dbus_env()
     ensure_display_env()
-    list_props = subprocess.run(["xfconf-query", "-c", "xfce4-desktop", "-l"], capture_output=True, text=True)
-    if list_props.returncode != 0:
-        log(f"xfconf-query -l failed: {list_props.stderr.strip()}")
+    list_result = subprocess.run(
+        ["xfconf-query", "-c", "xfce4-desktop", "-l"],
+        capture_output=True, text=True)
+    if list_result.returncode != 0:
+        log(f"xfconf-query -l failed: {list_result.stderr.strip()}")
         return False
-    props = [p for p in list_props.stdout.splitlines() if p.endswith("last-image")]
-    if not props:
-        log("No xfce4-desktop 'last-image' properties found (no monitors configured yet?).")
+    image_properties = [
+        name for name in list_result.stdout.splitlines()
+        if name.endswith("last-image")
+    ]
+    if not image_properties:
+        log("No xfce4-desktop 'last-image' properties found "
+            "(no monitors configured yet?).")
         return False
-    ok = True
-    for prop in props:
-        r = subprocess.run(
-            ["xfconf-query", "-c", "xfce4-desktop", "-p", prop, "-s", str(image_path)],
+    all_set = True
+    for image_property in image_properties:
+        result = subprocess.run(
+            ["xfconf-query", "-c", "xfce4-desktop", "-p", image_property,
+             "-s", str(image_path)],
             capture_output=True, text=True,
         )
-        if r.returncode != 0:
-            log(f"Failed to set {prop}: {r.stderr.strip()}")
-            ok = False
+        if result.returncode != 0:
+            log(f"Failed to set {image_property}: {result.stderr.strip()}")
+            all_set = False
         # image-style 4 = "Scaled": fit the whole image, letterboxed, no crop
         # (5 = "Zoomed" crops to fill, which is what was clipping portraits)
-        style_prop = prop[: -len("last-image")] + "image-style"
+        style_property = (
+            image_property[:-len("last-image")] + "image-style")
         subprocess.run(
-            ["xfconf-query", "-c", "xfce4-desktop", "-p", style_prop, "-s", "4"],
+            ["xfconf-query", "-c", "xfce4-desktop", "-p", style_property,
+             "-s", "4"],
             capture_output=True, text=True,
         )
     subprocess.run(["xfdesktop", "--reload"], capture_output=True, text=True)
-    return ok
+    return all_set
 
 
 @dataclass(frozen=True)
 class DesktopBackend:
-    """One supported desktop. To add a desktop: write its screen_size /
-    set_wallpaper functions above and append a DesktopBackend to BACKENDS.
+    """One supported desktop.
 
-    xdg_names: lowercase substrings matched against $XDG_CURRENT_DESKTOP.
-    process:   process name to pgrep for when the env var doesn't match
-               (e.g. when launched from a systemd unit with a bare env).
-    screen_size():        (width, height) or None if it can't be determined.
-    set_wallpaper(path):  True on success, False (after logging) on failure.
+    To add a desktop: write its screen_size / set_wallpaper functions above
+    and append a DesktopBackend to BACKENDS.
+
+    Attributes:
+        name: Short identifier, e.g. "kde".
+        xdg_names: Lowercase substrings matched against
+            $XDG_CURRENT_DESKTOP.
+        process: Process name to pgrep for when the env var doesn't match
+            (e.g. when launched from a systemd unit with a bare env).
+        screen_size: Called with no arguments; returns (width, height), or
+            None if it can't be determined.
+        set_wallpaper: Called with the image path; returns True on success,
+            or False (after logging) on failure.
+
     """
+
     name: str
-    xdg_names: tuple
-    process: Optional[str]
-    screen_size: Callable[[], Optional[tuple]]
+    xdg_names: tuple[str, ...]
+    process: str | None
+    screen_size: Callable[[], tuple[int, int] | None]
     set_wallpaper: Callable[[Path], bool]
 
 
 # Order matters: earlier entries win when several would match.
 BACKENDS = [
-    DesktopBackend("kde", ("kde",), "plasmashell", get_screen_size_kde, set_wallpaper_kde),
-    DesktopBackend("xfce", ("xfce",), "xfce4-session", get_screen_size_xfce, set_wallpaper_xfce),
+    DesktopBackend(
+        "kde", ("kde",), "plasmashell",
+        get_screen_size_kde, set_wallpaper_kde),
+    DesktopBackend(
+        "xfce", ("xfce",), "xfce4-session",
+        get_screen_size_xfce, set_wallpaper_xfce),
 ]
 
 
-def _process_running(name):
-    return subprocess.run(["pgrep", "-x", name], stdout=subprocess.DEVNULL,
-                          stderr=subprocess.DEVNULL).returncode == 0
+def _process_running(name: str) -> bool:
+    result = subprocess.run(
+        ["pgrep", "-x", name],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return result.returncode == 0
 
 
-def current_backend():
-    """The DesktopBackend for the running session, or None if unsupported.
-    Checks $XDG_CURRENT_DESKTOP across all backends first, and only then falls
-    back to looking for each backend's session process."""
-    xdg = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+def current_backend() -> DesktopBackend | None:
+    """Return the DesktopBackend for the running session, or None.
+
+    Checks $XDG_CURRENT_DESKTOP across all backends first, and only then
+    falls back to looking for each backend's session process.
+    """
+    current_desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
     for backend in BACKENDS:
-        if any(n in xdg for n in backend.xdg_names):
+        if any(name in current_desktop for name in backend.xdg_names):
             return backend
     for backend in BACKENDS:
         if backend.process and _process_running(backend.process):
@@ -719,21 +1012,29 @@ def current_backend():
     return None
 
 
-def detect_desktop():
+def detect_desktop() -> str | None:
+    """Name of the detected desktop (e.g. "kde"), or None if unsupported."""
     backend = current_backend()
     return backend.name if backend else None
 
 
-def get_screen_size():
+def get_screen_size() -> tuple[int, int] | None:
+    """Screen size as (width, height) on the detected desktop, or None."""
     backend = current_backend()
     return backend.screen_size() if backend else None
 
 
-def set_wallpaper(image_path):
+def set_wallpaper(image_path: Path | str) -> bool:
+    """Set `image_path` as the wallpaper on the detected desktop.
+
+    Returns True on success; logs and returns False if the desktop is
+    unsupported or the backend fails.
+    """
     backend = current_backend()
     if not backend:
         supported = " / ".join(b.name for b in BACKENDS)
-        log(f"Could not detect a supported desktop environment (looked for: {supported}).")
+        log("Could not detect a supported desktop environment "
+            f"(looked for: {supported}).")
         return False
     return backend.set_wallpaper(image_path)
 
@@ -741,72 +1042,104 @@ def set_wallpaper(image_path):
 # --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
-def _fail(state, message):
+def _record_failure(state: dict[str, Any], message: str) -> None:
+    """Log `message` and persist it as the last error (shown by the tray)."""
     log(message)
     state["last_error"] = message
     state["last_error_at"] = time.time()
     save_state(state)
 
 
-def main():
-    args = sys.argv[1:]
+def _run_control_command(args: list[str]) -> bool:
+    """Handle the pause/resume/status/back/forward flags.
+
+    Returns True if one was present (and handled), meaning no rotation
+    should follow.
+    """
     if "--pause" in args:
-        set_paused(True); log("Paused."); return
-    if "--resume" in args:
-        set_paused(False); log("Resumed."); return
-    if "--status" in args:
-        print(json.dumps(load_state(), indent=2)); return
-    if "--back" in args:
-        print("moved" if navigate(-1) else "at oldest"); return
-    if "--forward" in args:
-        print("moved" if navigate(1) else "at newest"); return
+        set_paused(True)
+        log("Paused.")
+    elif "--resume" in args:
+        set_paused(False)
+        log("Resumed.")
+    elif "--status" in args:
+        print(json.dumps(load_state(), indent=2))
+    elif "--back" in args:
+        print("moved" if navigate(-1) else "at oldest")
+    elif "--forward" in args:
+        print("moved" if navigate(1) else "at newest")
+    else:
+        return False
+    return True
+
+
+def main() -> None:
+    """Command-line entry point: run a control command or one rotation."""
+    args = sys.argv[1:]
+    if _run_control_command(args):
+        return
 
     force = "--once" in args
-    cfg = load_config()
+    config = load_config()
     state = load_state()
 
     if state.get("paused") and not force:
         return  # quiet no-op while paused
 
-    interval_s = max(60, int(cfg.get("interval_minutes", 5)) * 60)
-    elapsed = time.time() - state.get("last_run", 0)
-    if not force and elapsed < interval_s:
+    interval_minutes = int(
+        config.get("interval_minutes", DEFAULT_INTERVAL_MINUTES))
+    interval_seconds = max(MIN_INTERVAL_SECONDS, interval_minutes * 60)
+    seconds_since_last_run = time.time() - state.get("last_run", 0)
+    if not force and seconds_since_last_run < interval_seconds:
         return  # not due yet -- quiet no-op, caller polls often
 
     state["last_run"] = time.time()
     screen_size = get_screen_size()
 
     try:
-        assets = choose_assets_for_rotation(cfg, allow_pair=bool(screen_size))
-    except urllib.error.HTTPError as e:
-        _fail(state, f"Immich request failed: HTTP {e.code} {e.read().decode(errors='replace')[:200]}")
+        assets = choose_assets_for_rotation(
+            config, allow_pair=bool(screen_size))
+    except urllib.error.HTTPError as error:
+        body = error.read().decode(errors="replace")[:200]
+        _record_failure(
+            state, f"Immich request failed: HTTP {error.code} {body}")
         return
-    except urllib.error.URLError as e:
-        _fail(state, f"Could not reach Immich server: {e.reason}")
+    except urllib.error.URLError as error:
+        _record_failure(
+            state, f"Could not reach Immich server: {error.reason}")
         return
 
     if not assets:
-        _fail(state, "No matching image assets returned (check album/person filters).")
+        _record_failure(
+            state,
+            "No matching image assets returned (check album/person filters).")
         return
 
     try:
-        entry = build_wallpaper_entry(cfg, assets, screen_size)
-    except Exception as e:
-        _fail(state, f"Download/compose failed: {e}")
+        entry = build_wallpaper_entry(config, assets, screen_size)
+    except Exception as error:  # noqa: BLE001
+        # Any download/decode/compose failure is recorded for the tray to
+        # show rather than crashing the periodic run.
+        _record_failure(state, f"Download/compose failed: {error}")
         return
 
-    keep_count = max(2, int(cfg.get("keep_count", 3)))
+    keep_count = max(
+        MIN_KEEP_COUNT, int(config.get("keep_count", DEFAULT_KEEP_COUNT)))
     was_live = append_history(state, entry, keep_count)
+    image_name = Path(entry["path"]).name
 
     if was_live or force:
         entry["wallpaper_applied"] = set_wallpaper(Path(entry["path"]))
         if was_live is False:
-            state["position"] = len(state["history"]) - 1  # --once always jumps to the new live edge
-        log(f"Stored {Path(entry['path']).name} ({entry['kind']}, {entry['size_bytes']//1024} KB); "
-            f"wallpaper {'applied' if entry['wallpaper_applied'] else 'NOT applied'}")
+            # --once always jumps to the new live edge.
+            state["position"] = len(state["history"]) - 1
+        outcome = "applied" if entry["wallpaper_applied"] else "NOT applied"
+        log(f"Stored {image_name} ({entry['kind']}, "
+            f"{entry['size_bytes'] // 1024} KB); wallpaper {outcome}")
     else:
-        log(f"Stored {Path(entry['path']).name} ({entry['kind']}) in the background "
-            f"(you've navigated back in history, so it wasn't applied to the desktop)")
+        log(f"Stored {image_name} ({entry['kind']}) in the background "
+            "(you've navigated back in history, so it wasn't applied to "
+            "the desktop)")
 
     state["last_error"] = None
     state["last_error_at"] = None
