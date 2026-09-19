@@ -7,6 +7,7 @@ from unittest import mock
 
 from PIL import Image
 
+import compose
 import desktops
 import layout
 import rotate
@@ -161,7 +162,7 @@ class AspectTests(unittest.TestCase):
                   jpeg(600, 800, BLUE)]
         aspects = [0.75, 16 / 9, 0.75]
         plan = layout.plan_row(aspects, 5120, 1440, max_photos=3)
-        canvas = rotate.compose_row(
+        canvas = compose.compose_row(
             [photos[p.index] for p in plan], plan, 5120, 1440)
         self.assertEqual(canvas.size, (5120, 1440))
         for place, color in zip(plan, (RED, GREEN, BLUE)):
@@ -175,9 +176,9 @@ class AspectTests(unittest.TestCase):
     def test_a_single_photo_row_matches_the_letterbox(self):
         photo = jpeg(600, 800, RED)
         plan = layout.plan_row([0.75], 1920, 1080)
-        row = rotate.compose_row([photo], plan, 1920, 1080)
-        expected = rotate._letterbox_single(
-            rotate._load_oriented(photo), 1920, 1080)
+        row = compose.compose_row([photo], plan, 1920, 1080)
+        expected = compose.letterbox_single(
+            compose.load_oriented(photo), 1920, 1080)
         self.assertEqual(row.size, expected.size)
         self.assertTrue(close(row.getpixel((960, 540)),
                               expected.getpixel((960, 540)), 10))
@@ -312,7 +313,7 @@ class MultiMonitorBuilderTests(unittest.TestCase):
         self.assertEqual([a["id"] for a in alone["assets"]], ["n"])
 
     def test_the_date_is_drawn_on_the_primary_monitor_only(self):
-        with mock.patch.object(rotate, "draw_date_overlay") as date:
+        with mock.patch.object(compose, "draw_date_overlay") as date:
             self.build([(3200, 1800)] * 2, [M1, M2], "same",
                        show_date_overlay=True)
         self.assertEqual(date.call_count, 1)

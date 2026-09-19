@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import compose
 import desktops
 import immich_api
 import rotate
@@ -204,7 +205,7 @@ class DecodingUntrustedImagesTests(unittest.TestCase):
 
     def test_a_decompression_bomb_is_refused(self):
         with self.assertRaises(Exception):  # noqa: B017 (warning/error)
-            rotate._load_oriented(self.bomb())
+            compose.load_oriented(self.bomb())
 
     def test_a_bomb_falls_back_to_the_original_file(self):
         self.assertIsNone(rotate._compose_single(
@@ -215,7 +216,7 @@ class DecodingUntrustedImagesTests(unittest.TestCase):
         for error in (ValueError("v"), OSError("o"), ZeroDivisionError(),
                       RecursionError(), MemoryError()):
             with self.subTest(error=type(error).__name__), \
-                    mock.patch.object(rotate, "_load_oriented",
+                    mock.patch.object(compose, "load_oriented",
                                       side_effect=error):
                 self.assertIsNone(rotate._compose_single(
                     b"x", {}, {"originalFileName": "f.jpg"}, (100, 100),

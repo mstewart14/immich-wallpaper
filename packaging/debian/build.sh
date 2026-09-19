@@ -18,7 +18,7 @@ mkdir -p "$PKG_DIR/DEBIAN" "$PKG_DIR/usr/share/immich-wallpaper/assets" \
 cp "$REPO_ROOT/rotate.py" "$REPO_ROOT/tray_app.py" \
    "$REPO_ROOT/settings_window.py" "$REPO_ROOT/settings_service.py" \
    "$REPO_ROOT/settings.py" "$REPO_ROOT/immich_api.py" "$REPO_ROOT/desktops.py" \
-   "$REPO_ROOT/layout.py" "$REPO_ROOT/screens.py" \
+   "$REPO_ROOT/layout.py" "$REPO_ROOT/screens.py" "$REPO_ROOT/compose.py" \
    "$PKG_DIR/usr/share/immich-wallpaper/"
 cp "$REPO_ROOT/assets/immich-flower.png" "$REPO_ROOT/assets/app-icon.png" \
    "$PKG_DIR/usr/share/immich-wallpaper/assets/"
