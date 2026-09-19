@@ -27,29 +27,24 @@ Usage:
 from __future__ import annotations
 
 import contextlib
-import functools
-import glob
 import json
+import logging
 import os
 import random
-import re
-import subprocess
 import sys
 import time
 import urllib.error
-import urllib.request
 import uuid
-from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-CONFIG_PATH = Path.home() / ".config" / "immich-wallpaper" / "config.json"
-CACHE_DIR = Path.home() / ".cache" / "immich-wallpaper"
-IMAGES_DIR = CACHE_DIR / "images"
-STATE_PATH = CACHE_DIR / "state.json"
+import desktops
+import immich_api
+import settings
+
+logger = logging.getLogger(__name__)
 
 EXT_BY_MIME = {
     "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
@@ -57,7 +52,6 @@ EXT_BY_MIME = {
     "image/bmp": ".bmp", "image/tiff": ".tiff",
 }
 
-API_TIMEOUT_SECONDS = 30
 DOWNLOAD_TIMEOUT_SECONDS = 60
 
 DEFAULT_INTERVAL_MINUTES = 5
@@ -80,92 +74,25 @@ EXIF_QUARTER_TURN_ORIENTATIONS = (5, 6, 7, 8)
 ASPECT_RATIO_TOLERANCE = 1.05
 
 
-def log(message: str) -> None:
-    """Print `message` to stdout with a timestamp."""
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] {message}", flush=True)
-
-
 # --------------------------------------------------------------------------
-# Config / state
+# Config / history navigation
 # --------------------------------------------------------------------------
-def load_config() -> dict[str, Any]:
-    """Read config.json, exiting with a message if it is missing/incomplete."""
-    if not CONFIG_PATH.exists():
-        log(f"No config at {CONFIG_PATH}. "
-            "Run the config UI and save a configuration first.")
+def load_required_config() -> dict[str, Any]:
+    """Read config.json as stored, exiting if it is missing/incomplete.
+
+    Unlike settings.load_config() this applies no defaults: an incomplete
+    config means setup was never finished, so a rotation can't proceed.
+    """
+    if not settings.CONFIG_PATH.exists():
+        logger.error("No config at %s. Run the config UI and save a "
+                     "configuration first.", settings.CONFIG_PATH)
         sys.exit(1)
-    config = json.loads(CONFIG_PATH.read_text())
+    config = settings.read_stored_config()
     if not config.get("immich_url") or not config.get("api_key"):
-        log("Config is missing immich_url or api_key. "
-            "Run the config UI to finish setup.")
+        logger.error("Config is missing immich_url or api_key. "
+                     "Run the config UI to finish setup.")
         sys.exit(1)
     return config
-
-
-# `history` runs oldest -> newest; each entry has kind, path, assets[],
-# size_bytes and created_at. `position` is the index into `history` that is
-# currently applied to the desktop (-1 when there is no history yet).
-DEFAULT_STATE = {
-    "last_run": 0,
-    "last_success": None,
-    "last_error": None,
-    "last_error_at": None,
-    "paused": False,
-    "history": [],
-    "position": -1,
-}
-
-
-def load_state() -> dict[str, Any]:
-    """Load the persisted rotation state.
-
-    Falls back to the defaults if the state file is missing or unreadable.
-    """
-    state = dict(DEFAULT_STATE)
-    if STATE_PATH.exists():
-        with contextlib.suppress(json.JSONDecodeError, OSError):
-            state.update(json.loads(STATE_PATH.read_text()))
-    return state
-
-
-def save_state(state: dict[str, Any]) -> None:
-    """Persist `state` atomically (write a temp file, then rename it)."""
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    temp_path = STATE_PATH.with_suffix(".json.tmp")
-    temp_path.write_text(json.dumps(state))
-    temp_path.replace(STATE_PATH)
-
-
-def set_paused(paused: bool) -> dict[str, Any]:
-    """Pause or resume rotation and return the updated state."""
-    state = load_state()
-    state["paused"] = paused
-    save_state(state)
-    return state
-
-
-def current_entry(state: dict[str, Any] | None = None) -> dict | None:
-    """Return the history entry applied to the desktop, or None."""
-    state = state or load_state()
-    history = state.get("history") or []
-    position = state.get("position", -1)
-    if 0 <= position < len(history):
-        return history[position]
-    return None
-
-
-def can_go_back(state: dict[str, Any] | None = None) -> bool:
-    """Whether there is an older wallpaper in the history to step back to."""
-    state = state or load_state()
-    return (state.get("position") or 0) > 0
-
-
-def can_go_forward(state: dict[str, Any] | None = None) -> bool:
-    """Whether there is a newer wallpaper in the history to step forward to."""
-    state = state or load_state()
-    history = state.get("history") or []
-    return state.get("position", -1) < len(history) - 1
 
 
 def navigate(direction: int) -> bool:
@@ -174,7 +101,7 @@ def navigate(direction: int) -> bool:
     Returns True if the wallpaper moved, False if there was nowhere to go
     or the target image is no longer on disk.
     """
-    state = load_state()
+    state = settings.load_state()
     history = state.get("history") or []
     if not history:
         return False
@@ -186,53 +113,10 @@ def navigate(direction: int) -> bool:
     path = Path(entry["path"])
     if not path.exists():
         return False
-    entry["wallpaper_applied"] = set_wallpaper(path)
+    entry["wallpaper_applied"] = desktops.set_wallpaper(path)
     state["position"] = new_position
-    save_state(state)
+    settings.save_state(state)
     return True
-
-
-# --------------------------------------------------------------------------
-# Immich API
-# --------------------------------------------------------------------------
-def _api_url(base_url: str, path: str) -> str:
-    return base_url.rstrip("/") + "/api" + path
-
-
-def immich_post(base_url: str, api_key: str, path: str, body: dict) -> Any:
-    """POST `body` as JSON to an Immich API `path`.
-
-    Returns the parsed reply, or None if the reply is empty.
-    """
-    request = urllib.request.Request(
-        _api_url(base_url, path), data=json.dumps(body).encode(),
-        method="POST",
-        headers={"x-api-key": api_key, "Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(request, timeout=API_TIMEOUT_SECONDS) as reply:
-        raw = reply.read()
-        return json.loads(raw) if raw else None
-
-
-def immich_get_bytes(
-    base_url: str, api_key: str, path: str,
-) -> tuple[bytes, str | None]:
-    """GET an Immich API `path`; return (body bytes, Content-Type header)."""
-    request = urllib.request.Request(
-        _api_url(base_url, path), headers={"x-api-key": api_key})
-    with urllib.request.urlopen(
-        request, timeout=DOWNLOAD_TIMEOUT_SECONDS,
-    ) as reply:
-        return reply.read(), reply.getheader("Content-Type")
-
-
-def immich_get_json(base_url: str, api_key: str, path: str) -> Any:
-    """GET an Immich API `path`; return the parsed JSON (None if empty)."""
-    request = urllib.request.Request(
-        _api_url(base_url, path), headers={"x-api-key": api_key})
-    with urllib.request.urlopen(request, timeout=API_TIMEOUT_SECONDS) as reply:
-        raw = reply.read()
-        return json.loads(raw) if raw else None
 
 
 def get_asset_details(config: dict, asset_id: str) -> dict | None:
@@ -243,7 +127,7 @@ def get_asset_details(config: dict, asset_id: str) -> dict | None:
     photo.
     """
     try:
-        return immich_get_json(
+        return immich_api.get_json(
             config["immich_url"], config["api_key"], f"/assets/{asset_id}")
     except (urllib.error.URLError, json.JSONDecodeError, KeyError):
         # URLError also covers HTTPError.
@@ -280,7 +164,7 @@ def pick_image_batch(
         else:
             body["personIds"] = [random.choice(people)["id"]]
 
-    assets = immich_post(
+    assets = immich_api.post_json(
         config["immich_url"], config["api_key"], "/search/random", body)
     if not assets:
         return []
@@ -335,10 +219,10 @@ def choose_assets_for_rotation(config: dict, allow_pair: bool) -> list[dict]:
 def download_asset_bytes(
     config: dict, asset: dict,
 ) -> tuple[bytes, str | None]:
-    """Download the original file for `asset`; see immich_get_bytes()."""
-    return immich_get_bytes(
+    """Download the original file for `asset`; see immich_api.get_bytes()."""
+    return immich_api.get_bytes(
         config["immich_url"], config["api_key"],
-        f"/assets/{asset['id']}/original")
+        f"/assets/{asset['id']}/original", timeout=DOWNLOAD_TIMEOUT_SECONDS)
 
 
 def asset_meta(config: dict, asset: dict) -> dict[str, Any]:
@@ -435,10 +319,6 @@ _OUTLINE_OFFSETS = (
 
 # Distance kept clear of every screen edge, on top of any taskbar/panel.
 EDGE_MARGIN_INCHES = 0.5
-FALLBACK_DPI = 96.0
-# A detected panel wider than this fraction of the screen is assumed to be
-# a bad measurement (e.g. a multi-monitor work area) and ignored.
-MAX_INSET_FRACTION = 0.4
 
 
 def _load_font(size: int):
@@ -507,41 +387,9 @@ def photo_caption_lines(details: dict | None) -> list[str]:
     return lines
 
 
-@functools.lru_cache(maxsize=1)
-def get_screen_dpi() -> float:
-    """Best-effort physical DPI via xrandr's per-monitor mm dimensions.
-
-    Works via XWayland on a Wayland KDE session too. Falls back to the
-    common 96 DPI default if detection fails for any reason. Cached --
-    doesn't change within a single rotation, and each rotate.py invocation
-    is a fresh short-lived process anyway.
-    """
-    try:
-        result = subprocess.run(
-            ["xrandr", "--query"], capture_output=True, text=True, timeout=5)
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return FALLBACK_DPI
-    if result.returncode != 0:
-        return FALLBACK_DPI
-    match = (
-        re.search(r"connected primary (\d+)x(\d+)\+\d+\+\d+.*?"
-                  r"(\d+)mm x (\d+)mm", result.stdout)
-        or re.search(r"connected (\d+)x(\d+)\+\d+\+\d+.*?"
-                     r"(\d+)mm x (\d+)mm", result.stdout)
-    )
-    if not match:
-        return FALLBACK_DPI
-    width_px, height_px, width_mm, height_mm = map(int, match.groups())
-    if width_mm <= 0 or height_mm <= 0:
-        return FALLBACK_DPI
-    horizontal_dpi = width_px / (width_mm / 25.4)
-    vertical_dpi = height_px / (height_mm / 25.4)
-    return (horizontal_dpi + vertical_dpi) / 2
-
-
 def edge_margin_px() -> int:
     """Return the base margin kept clear of screen edges, in pixels."""
-    return round(get_screen_dpi() * EDGE_MARGIN_INCHES)
+    return round(desktops.get_screen_dpi() * EDGE_MARGIN_INCHES)
 
 
 def draw_caption(
@@ -600,56 +448,6 @@ def draw_date_overlay(canvas, extra_x: int = 0, extra_top: int = 0) -> None:
         time.strftime("%A, %B %-d"), font)
 
 
-def get_work_area() -> tuple[int, int, int, int] | None:
-    """Best-effort usable-desktop-area query, as (x, y, width, height).
-
-    Uses the EWMH _NET_WORKAREA root window property -- works via XWayland
-    even on a Wayland KDE session, and natively under XFCE's X11. Returns
-    None if xprop is missing, fails, or the output doesn't parse.
-    """
-    try:
-        result = subprocess.run(
-            ["xprop", "-root", "_NET_WORKAREA"],
-            capture_output=True, text=True, timeout=5)
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None
-    if result.returncode != 0:
-        return None
-    match = re.search(r"=\s*(-?\d+),\s*(-?\d+),\s*(\d+),\s*(\d+)",
-                      result.stdout)
-    return tuple(int(group) for group in match.groups()) if match else None
-
-
-def screen_insets(screen_size: tuple[int, int] | None) -> dict[str, int]:
-    """How many pixels on each screen edge are covered by a taskbar/panel.
-
-    Derived from comparing the usable work area to the full screen size.
-    All-zero (today's flat-margin behaviour) if detection fails or looks
-    nonsensical -- e.g. a multi-monitor work area union wider than this one
-    screen, which we'd rather ignore than risk a broken layout from.
-    """
-    no_insets = {"left": 0, "top": 0, "right": 0, "bottom": 0}
-    if not screen_size:
-        return no_insets
-    work_area = get_work_area()
-    if not work_area:
-        return no_insets
-    work_x, work_y, work_width, work_height = work_area
-    screen_width, screen_height = screen_size
-    insets = {
-        "left": max(0, work_x),
-        "top": max(0, work_y),
-        "right": max(0, screen_width - (work_x + work_width)),
-        "bottom": max(0, screen_height - (work_y + work_height)),
-    }
-    if (insets["left"] > screen_width * MAX_INSET_FRACTION
-            or insets["right"] > screen_width * MAX_INSET_FRACTION
-            or insets["top"] > screen_height * MAX_INSET_FRACTION
-            or insets["bottom"] > screen_height * MAX_INSET_FRACTION):
-        return no_insets
-    return insets
-
-
 # --------------------------------------------------------------------------
 # Building the wallpaper file
 # --------------------------------------------------------------------------
@@ -673,7 +471,7 @@ def _compose_pair_wallpaper(
     show_info: bool, show_date: bool,
 ):
     """Side-by-side canvas for two portrait assets, with optional overlays."""
-    insets = screen_insets(screen_size)
+    insets = desktops.screen_insets(screen_size)
     data_left, _ = download_asset_bytes(config, assets[0])
     data_right, _ = download_asset_bytes(config, assets[1])
     canvas = compose_pair(data_left, data_right, *screen_size)
@@ -705,7 +503,7 @@ def _compose_single_with_overlays(
     # on-screen pixel positions.
     if screen_size:
         canvas = _letterbox_single(canvas, *screen_size)
-    insets = screen_insets(screen_size)
+    insets = desktops.screen_insets(screen_size)
     if show_info:
         _draw_photo_caption(canvas, config, asset, 0, canvas.width,
                             "left", insets)
@@ -723,7 +521,7 @@ def _save_original_file(config: dict, asset: dict, stem: str) -> Path:
         extension = EXT_BY_MIME.get(
             asset.get("originalMimeType"),
             EXT_BY_MIME.get(content_type, ".jpg"))
-    path = IMAGES_DIR / f"{stem}{extension}"
+    path = settings.IMAGES_DIR / f"{stem}{extension}"
     path.write_bytes(data)
     return path
 
@@ -739,7 +537,7 @@ def build_wallpaper_entry(
     enabled is redrawn as a JPEG; otherwise the original file is saved
     as-is.
     """
-    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    settings.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     # Timestamp plus random suffix: unique even across same-second calls.
     stem = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
     show_info = bool(config.get("show_photo_info"))
@@ -760,7 +558,7 @@ def build_wallpaper_entry(
     if canvas is None:
         path = _save_original_file(config, assets[0], stem)
     else:
-        path = IMAGES_DIR / f"{stem}.jpg"
+        path = settings.IMAGES_DIR / f"{stem}.jpg"
         canvas.save(path, "JPEG", quality=JPEG_QUALITY)
 
     return {
@@ -816,238 +614,14 @@ def append_history(
 
 
 # --------------------------------------------------------------------------
-# Desktop environment adapters
-# --------------------------------------------------------------------------
-def ensure_dbus_env() -> None:
-    """Point DBUS_SESSION_BUS_ADDRESS at the user's session bus if unset.
-
-    Needed when launched from e.g. a systemd unit with a bare environment.
-    """
-    if "DBUS_SESSION_BUS_ADDRESS" not in os.environ:
-        runtime_dir = os.environ.get(
-            "XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-        bus_path = f"{runtime_dir}/bus"
-        if os.path.exists(bus_path):
-            os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus_path}"
-
-
-def ensure_display_env() -> None:
-    """Point DISPLAY at the first X11 socket if unset (see ensure_dbus_env)."""
-    if "DISPLAY" not in os.environ:
-        sockets = sorted(glob.glob("/tmp/.X11-unix/X*"))
-        if sockets:
-            display_number = os.path.basename(sockets[0])[1:]
-            os.environ["DISPLAY"] = ":" + display_number
-
-
-def _run_plasma_script(script: str) -> subprocess.CompletedProcess:
-    """Run a Plasma desktop-scripting `script` in the running plasmashell."""
-    ensure_dbus_env()
-    return subprocess.run(
-        ["dbus-send", "--session", "--print-reply",
-         "--dest=org.kde.plasmashell", "/PlasmaShell",
-         "org.kde.PlasmaShell.evaluateScript", f"string:{script}"],
-        capture_output=True, text=True,
-    )
-
-
-def get_screen_size_kde() -> tuple[int, int] | None:
-    """Primary screen size as (width, height) via Plasma, or None."""
-    result = _run_plasma_script(
-        "print(screenGeometry(0).width + 'x' + screenGeometry(0).height);")
-    if result.returncode != 0:
-        return None
-    match = re.search(r'string "(\d+)x(\d+)"', result.stdout)
-    return (int(match.group(1)), int(match.group(2))) if match else None
-
-
-def get_screen_size_xfce() -> tuple[int, int] | None:
-    """Primary screen size as (width, height) via xrandr, or None."""
-    result = subprocess.run(
-        ["xrandr", "--query"], capture_output=True, text=True)
-    if result.returncode != 0:
-        return None
-    # Prefer the monitor xrandr marks "primary"; fall back to the first
-    # connected+active one otherwise (e.g. "eDP-1 connected 1920x1080+0+0").
-    match = (re.search(r"connected primary (\d+)x(\d+)\+", result.stdout)
-             or re.search(r"connected (\d+)x(\d+)\+", result.stdout))
-    return (int(match.group(1)), int(match.group(2))) if match else None
-
-
-def set_wallpaper_kde(image_path: Path | str) -> bool:
-    """Set `image_path` as the wallpaper on every Plasma desktop.
-
-    Returns True on success; logs and returns False on failure.
-    """
-    # Toggling the plugin away and back (even when it's already org.kde.image)
-    # forces Plasma to tear down and recreate the wallpaper QML item. Without
-    # this, writeConfig() alone updates the stored config correctly but the
-    # on-screen render can silently stop refreshing after the first call,
-    # because assigning wallpaperPlugin to its current value is a no-op that
-    # Qt's property system skips -- no change signal, no re-render.
-    script = f'''
-var allDesktops = desktops();
-for (i = 0; i < allDesktops.length; i++) {{
-    d = allDesktops[i];
-    d.wallpaperPlugin = "org.kde.color";
-    d.wallpaperPlugin = "org.kde.image";
-    d.currentConfigGroup = Array("Wallpaper", "org.kde.image", "General");
-    d.writeConfig("Image", "file://{image_path}");
-    d.writeConfig("FillMode", 1);
-}}
-'''
-    result = _run_plasma_script(script)
-    if result.returncode != 0:
-        log(f"KDE wallpaper set failed: {result.stderr.strip()}")
-        return False
-    if "error" in result.stdout.lower() and "Error: 0" not in result.stdout:
-        log(f"KDE wallpaper set returned an error: {result.stdout.strip()}")
-        return False
-    return True
-
-
-def set_wallpaper_xfce(image_path: Path | str) -> bool:
-    """Set `image_path` as the wallpaper on every XFCE monitor/workspace.
-
-    Returns True if every property was set; logs and returns False on
-    failure.
-    """
-    ensure_dbus_env()
-    ensure_display_env()
-    list_result = subprocess.run(
-        ["xfconf-query", "-c", "xfce4-desktop", "-l"],
-        capture_output=True, text=True)
-    if list_result.returncode != 0:
-        log(f"xfconf-query -l failed: {list_result.stderr.strip()}")
-        return False
-    image_properties = [
-        name for name in list_result.stdout.splitlines()
-        if name.endswith("last-image")
-    ]
-    if not image_properties:
-        log("No xfce4-desktop 'last-image' properties found "
-            "(no monitors configured yet?).")
-        return False
-    all_set = True
-    for image_property in image_properties:
-        result = subprocess.run(
-            ["xfconf-query", "-c", "xfce4-desktop", "-p", image_property,
-             "-s", str(image_path)],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            log(f"Failed to set {image_property}: {result.stderr.strip()}")
-            all_set = False
-        # image-style 4 = "Scaled": fit the whole image, letterboxed, no crop
-        # (5 = "Zoomed" crops to fill, which is what was clipping portraits)
-        style_property = (
-            image_property[:-len("last-image")] + "image-style")
-        subprocess.run(
-            ["xfconf-query", "-c", "xfce4-desktop", "-p", style_property,
-             "-s", "4"],
-            capture_output=True, text=True,
-        )
-    subprocess.run(["xfdesktop", "--reload"], capture_output=True, text=True)
-    return all_set
-
-
-@dataclass(frozen=True)
-class DesktopBackend:
-    """One supported desktop.
-
-    To add a desktop: write its screen_size / set_wallpaper functions above
-    and append a DesktopBackend to BACKENDS.
-
-    Attributes:
-        name: Short identifier, e.g. "kde".
-        xdg_names: Lowercase substrings matched against
-            $XDG_CURRENT_DESKTOP.
-        process: Process name to pgrep for when the env var doesn't match
-            (e.g. when launched from a systemd unit with a bare env).
-        screen_size: Called with no arguments; returns (width, height), or
-            None if it can't be determined.
-        set_wallpaper: Called with the image path; returns True on success,
-            or False (after logging) on failure.
-
-    """
-
-    name: str
-    xdg_names: tuple[str, ...]
-    process: str | None
-    screen_size: Callable[[], tuple[int, int] | None]
-    set_wallpaper: Callable[[Path], bool]
-
-
-# Order matters: earlier entries win when several would match.
-BACKENDS = [
-    DesktopBackend(
-        "kde", ("kde",), "plasmashell",
-        get_screen_size_kde, set_wallpaper_kde),
-    DesktopBackend(
-        "xfce", ("xfce",), "xfce4-session",
-        get_screen_size_xfce, set_wallpaper_xfce),
-]
-
-
-def _process_running(name: str) -> bool:
-    result = subprocess.run(
-        ["pgrep", "-x", name],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return result.returncode == 0
-
-
-def current_backend() -> DesktopBackend | None:
-    """Return the DesktopBackend for the running session, or None.
-
-    Checks $XDG_CURRENT_DESKTOP across all backends first, and only then
-    falls back to looking for each backend's session process.
-    """
-    current_desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
-    for backend in BACKENDS:
-        if any(name in current_desktop for name in backend.xdg_names):
-            return backend
-    for backend in BACKENDS:
-        if backend.process and _process_running(backend.process):
-            return backend
-    return None
-
-
-def detect_desktop() -> str | None:
-    """Name of the detected desktop (e.g. "kde"), or None if unsupported."""
-    backend = current_backend()
-    return backend.name if backend else None
-
-
-def get_screen_size() -> tuple[int, int] | None:
-    """Screen size as (width, height) on the detected desktop, or None."""
-    backend = current_backend()
-    return backend.screen_size() if backend else None
-
-
-def set_wallpaper(image_path: Path | str) -> bool:
-    """Set `image_path` as the wallpaper on the detected desktop.
-
-    Returns True on success; logs and returns False if the desktop is
-    unsupported or the backend fails.
-    """
-    backend = current_backend()
-    if not backend:
-        supported = " / ".join(b.name for b in BACKENDS)
-        log("Could not detect a supported desktop environment "
-            f"(looked for: {supported}).")
-        return False
-    return backend.set_wallpaper(image_path)
-
-
-# --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
 def _record_failure(state: dict[str, Any], message: str) -> None:
     """Log `message` and persist it as the last error (shown by the tray)."""
-    log(message)
+    logger.error("%s", message)
     state["last_error"] = message
     state["last_error_at"] = time.time()
-    save_state(state)
+    settings.save_state(state)
 
 
 def _run_control_command(args: list[str]) -> bool:
@@ -1057,13 +631,13 @@ def _run_control_command(args: list[str]) -> bool:
     should follow.
     """
     if "--pause" in args:
-        set_paused(True)
-        log("Paused.")
+        settings.set_paused(True)
+        logger.info("Paused.")
     elif "--resume" in args:
-        set_paused(False)
-        log("Resumed.")
+        settings.set_paused(False)
+        logger.info("Resumed.")
     elif "--status" in args:
-        print(json.dumps(load_state(), indent=2))
+        print(json.dumps(settings.load_state(), indent=2))
     elif "--back" in args:
         print("moved" if navigate(-1) else "at oldest")
     elif "--forward" in args:
@@ -1075,13 +649,16 @@ def _run_control_command(args: list[str]) -> bool:
 
 def main() -> None:
     """Command-line entry point: run a control command or one rotation."""
+    logging.basicConfig(
+        stream=sys.stdout, level=logging.INFO,
+        format="[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     args = sys.argv[1:]
     if _run_control_command(args):
         return
 
     force = "--once" in args
-    config = load_config()
-    state = load_state()
+    config = load_required_config()
+    state = settings.load_state()
 
     if state.get("paused") and not force:
         return  # quiet no-op while paused
@@ -1094,7 +671,7 @@ def main() -> None:
         return  # not due yet -- quiet no-op, caller polls often
 
     state["last_run"] = time.time()
-    screen_size = get_screen_size()
+    screen_size = desktops.get_screen_size()
 
     try:
         assets = choose_assets_for_rotation(
@@ -1129,22 +706,23 @@ def main() -> None:
     image_name = Path(entry["path"]).name
 
     if was_live or force:
-        entry["wallpaper_applied"] = set_wallpaper(Path(entry["path"]))
+        entry["wallpaper_applied"] = desktops.set_wallpaper(
+            Path(entry["path"]))
         if was_live is False:
             # --once always jumps to the new live edge.
             state["position"] = len(state["history"]) - 1
         outcome = "applied" if entry["wallpaper_applied"] else "NOT applied"
-        log(f"Stored {image_name} ({entry['kind']}, "
-            f"{entry['size_bytes'] // 1024} KB); wallpaper {outcome}")
+        logger.info("Stored %s (%s, %d KB); wallpaper %s", image_name,
+                    entry["kind"], entry["size_bytes"] // 1024, outcome)
     else:
-        log(f"Stored {image_name} ({entry['kind']}) in the background "
-            "(you've navigated back in history, so it wasn't applied to "
-            "the desktop)")
+        logger.info("Stored %s (%s) in the background (you've navigated "
+                    "back in history, so it wasn't applied to the desktop)",
+                    image_name, entry["kind"])
 
     state["last_error"] = None
     state["last_error_at"] = None
     state["last_success"] = time.time()
-    save_state(state)
+    settings.save_state(state)
 
 
 if __name__ == "__main__":

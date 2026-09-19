@@ -12,71 +12,20 @@ Usage:
 Config is read/written at ~/.config/immich-wallpaper/config.json (mode 600).
 """
 import json
-import os
-import stat
 import subprocess
 import sys
 import argparse
 import webbrowser
-import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-CONFIG_DIR = Path.home() / ".config" / "immich-wallpaper"
-CONFIG_PATH = CONFIG_DIR / "config.json"
+import immich_api
+import settings
+
 HERE = Path(__file__).resolve().parent
 INDEX_HTML = HERE / "index.html"
-
-DEFAULT_CONFIG = {
-    "immich_url": "",
-    "api_key": "",
-    "interval_minutes": 5,
-    "keep_count": 2,
-    "albums": [],
-    "people": [],
-    "person_match": "any",
-    "show_photo_info": False,
-    "show_date_overlay": False,
-}
-
-
-def load_config():
-    if CONFIG_PATH.exists():
-        try:
-            data = json.loads(CONFIG_PATH.read_text())
-            merged = dict(DEFAULT_CONFIG)
-            merged.update(data)
-            return merged
-        except (json.JSONDecodeError, OSError):
-            pass
-    return dict(DEFAULT_CONFIG)
-
-
-def save_config(cfg):
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = CONFIG_PATH.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(cfg, indent=2))
-    os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
-    tmp.replace(CONFIG_PATH)
-
-
-def immich_request(base_url, api_key, path, method="GET", body=None, headers_only=False):
-    url = base_url.rstrip("/") + "/api" + path
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    if api_key:
-        req.add_header("x-api-key", api_key)
-    if data is not None:
-        req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        if headers_only:
-            return resp.status, resp.getheader("Content-Type"), resp.read()
-        raw = resp.read()
-        ctype = resp.getheader("Content-Type") or ""
-        if "application/json" in ctype:
-            return json.loads(raw) if raw else None
-        return raw
+IMMICH_TIMEOUT_SECONDS = 15
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -121,7 +70,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
         elif path == "/api/config":
-            self._send_json(load_config())
+            self._send_json(settings.load_config())
         elif path == "/api/person-thumb":
             q = self._query()
             person_id = q.get("person_id", [None])[0]
@@ -132,7 +81,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             try:
-                data = immich_request(immich_url, api_key, f"/people/{person_id}/thumbnail")
+                data, _ = immich_api.get_bytes(
+                    immich_url, api_key, f"/people/{person_id}/thumbnail",
+                    timeout=IMMICH_TIMEOUT_SECONDS)
                 self.send_response(200)
                 self.send_header("Content-Type", "image/jpeg")
                 self.send_header("Content-Length", str(len(data)))
@@ -174,7 +125,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "Server URL and API key are both required."})
             return
         try:
-            ping = immich_request(url, key, "/server/ping")
+            ping = immich_api.get_json(
+                url, key, "/server/ping", timeout=IMMICH_TIMEOUT_SECONDS)
         except urllib.error.URLError as e:
             self._send_json({"ok": False, "error": f"Could not reach {url}: {e.reason}"})
             return
@@ -185,7 +137,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "Server responded but not with a valid Immich ping."})
             return
         try:
-            albums = immich_request(url, key, "/albums")
+            albums = immich_api.get_json(
+                url, key, "/albums", timeout=IMMICH_TIMEOUT_SECONDS)
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
                 self._send_json({"ok": False, "error": "Server reachable, but the API key was rejected (401/403). Check the key and its permissions."})
@@ -201,7 +154,8 @@ class Handler(BaseHTTPRequestHandler):
         url = (body.get("immich_url") or "").strip()
         key = (body.get("api_key") or "").strip()
         try:
-            albums = immich_request(url, key, "/albums")
+            albums = immich_api.get_json(
+                url, key, "/albums", timeout=IMMICH_TIMEOUT_SECONDS)
         except Exception as e:
             self._send_json({"ok": False, "error": str(e)})
             return
@@ -218,7 +172,9 @@ class Handler(BaseHTTPRequestHandler):
         page = 1
         try:
             while True:
-                resp = immich_request(url, key, f"/people?page={page}&size=250&withHidden=true")
+                resp = immich_api.get_json(
+                    url, key, f"/people?page={page}&size=250&withHidden=true",
+                    timeout=IMMICH_TIMEOUT_SECONDS)
                 batch = resp.get("people", [])
                 people.extend(batch)
                 if not resp.get("hasNextPage") or not batch:
@@ -236,7 +192,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"ok": True, "people": out})
 
     def _handle_save(self, body):
-        cfg = load_config()
+        cfg = settings.load_config()
         for key in ("immich_url", "api_key"):
             if key in body:
                 cfg[key] = str(body[key]).strip()
@@ -255,7 +211,7 @@ class Handler(BaseHTTPRequestHandler):
         for key in ("show_photo_info", "show_date_overlay"):
             if key in body:
                 cfg[key] = bool(body[key])
-        save_config(cfg)
+        settings.save_config(cfg)
 
         applied = False
         try:
@@ -278,7 +234,7 @@ def main():
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     url = f"http://127.0.0.1:{args.port}/"
     print(f"Immich wallpaper config UI running at {url}  (Ctrl+C to stop)")
-    print(f"Config file: {CONFIG_PATH}")
+    print(f"Config file: {settings.CONFIG_PATH}")
     if not args.no_browser:
         try:
             webbrowser.open(url)

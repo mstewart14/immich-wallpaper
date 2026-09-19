@@ -24,6 +24,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import rotate  # noqa: E402  (local module, see sys.path.insert above)
+import settings  # noqa: E402
 
 try:
     import pystray
@@ -108,7 +109,7 @@ def status_for_state(state):
         return "paused"
     if state.get("last_error"):
         return "error"
-    if rotate.current_entry(state):
+    if settings.current_entry(state):
         return "active"
     return "unknown"
 
@@ -132,7 +133,7 @@ def human_age(ts):
 
 
 def status_text(item=None):
-    state = rotate.load_state()
+    state = settings.load_state()
     if state.get("paused"):
         return "⏸ Paused"
     if state.get("last_error"):
@@ -143,28 +144,28 @@ def status_text(item=None):
 
 
 def image_text(item=None):
-    entry = rotate.current_entry()
+    entry = settings.current_entry()
     if not entry:
         return "No image loaded yet"
     names = [a.get("original_filename") or "?" for a in entry.get("assets", [])]
     kb = (entry.get("size_bytes") or 0) // 1024
     label = " + ".join(names) if entry.get("kind") == "pair" else (names[0] if names else Path(entry["path"]).name)
-    pos_state = rotate.load_state()
+    pos_state = settings.load_state()
     idx = pos_state.get("position", -1) + 1
     total = len(pos_state.get("history") or [])
     return f"\U0001f5bc [{idx}/{total}] {label} ({kb} KB)"
 
 
 def has_current_image(item=None):
-    return rotate.current_entry() is not None
+    return settings.current_entry() is not None
 
 
 def pause_toggle_text(item=None):
-    return "Resume rotation" if rotate.load_state().get("paused") else "Pause rotation"
+    return "Resume rotation" if settings.load_state().get("paused") else "Pause rotation"
 
 
 def back_enabled(item=None):
-    return rotate.can_go_back()
+    return settings.can_go_back()
 
 
 def _open_url_action(url):
@@ -177,7 +178,7 @@ def _open_url_action(url):
 def view_links_items(_menu=None):
     """Dynamic submenu contents: one entry per photo in the current
     wallpaper (1 for a single image, 2 for a side-by-side portrait pair)."""
-    entry = rotate.current_entry()
+    entry = settings.current_entry()
     if not entry:
         return [pystray.MenuItem("(nothing loaded)", None, enabled=False)]
     assets = entry.get("assets", [])
@@ -204,7 +205,7 @@ def notify(icon, message, title="Immich Wallpaper"):
 # Actions
 # --------------------------------------------------------------------------
 def refresh_icon(icon):
-    state = rotate.load_state()
+    state = settings.load_state()
     icon.icon = make_icon(status_for_state(state))
     icon.update_menu()
 
@@ -232,7 +233,7 @@ def pick_save_destination(default_name):
 
 
 def _save_copy_worker(icon):
-    entry = rotate.current_entry()
+    entry = settings.current_entry()
     if not entry:
         notify(icon, "No image loaded yet.")
         return
@@ -257,7 +258,7 @@ def action_save_copy(icon, item):
 def _refresh_worker(icon):
     subprocess.run([sys.executable, str(HERE / "rotate.py"), "--once"], capture_output=True)
     refresh_icon(icon)
-    state = rotate.load_state()
+    state = settings.load_state()
     if state.get("last_error"):
         notify(icon, state["last_error"])
 
@@ -267,8 +268,8 @@ def action_refresh(icon, item):
 
 
 def action_toggle_pause(icon, item):
-    state = rotate.load_state()
-    rotate.set_paused(not state.get("paused"))
+    state = settings.load_state()
+    settings.set_paused(not state.get("paused"))
     refresh_icon(icon)
 
 
@@ -278,7 +279,7 @@ def action_back(icon, item):
 
 
 def action_forward(icon, item):
-    if rotate.can_go_forward():
+    if settings.can_go_forward():
         rotate.navigate(1)
         refresh_icon(icon)
     else:
@@ -347,7 +348,7 @@ def poll_loop(icon):
     last_status = None
     while not stop_event.is_set():
         threading.Thread(target=_maybe_rotate, daemon=True).start()
-        state = rotate.load_state()
+        state = settings.load_state()
         status = status_for_state(state)
         if status != last_status:
             icon.icon = make_icon(status)
@@ -357,7 +358,7 @@ def poll_loop(icon):
 
 
 def main():
-    state = rotate.load_state()
+    state = settings.load_state()
     icon = pystray.Icon(
         "immich-wallpaper",
         make_icon(status_for_state(state)),
