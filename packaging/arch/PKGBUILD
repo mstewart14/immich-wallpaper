@@ -20,7 +20,8 @@ sha256sums=('2566a3715472b1ee1c6bc797d3b239a4d338bb858dcec0a441732d1d0476e71f')
 package() {
   cd "$srcdir/$pkgname-$pkgver"
 
-  install -Dm644 config_ui.py index.html rotate.py tray_app.py -t "$pkgdir/usr/share/immich-wallpaper/"
+  install -Dm644 config_ui.py index.html rotate.py tray_app.py \
+    settings.py immich_api.py desktops.py -t "$pkgdir/usr/share/immich-wallpaper/"
   install -Dm644 assets/immich-flower.png assets/app-icon.png -t "$pkgdir/usr/share/immich-wallpaper/assets/"
   install -Dm644 assets/app-icon.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/immich-wallpaper.png"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
