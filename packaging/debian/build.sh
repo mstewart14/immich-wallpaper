@@ -11,6 +11,7 @@ PKG_DIR="$BUILD_DIR/immich-wallpaper_${VERSION}_all"
 
 mkdir -p "$PKG_DIR/DEBIAN" "$PKG_DIR/usr/share/immich-wallpaper/assets" \
          "$PKG_DIR/usr/bin" "$PKG_DIR/etc/xdg/autostart" \
+         "$PKG_DIR/usr/share/applications" \
          "$PKG_DIR/usr/share/icons/hicolor/256x256/apps"
 
 # The web settings page (config_ui.py, index.html) is for platforms without
@@ -23,6 +24,8 @@ cp "$REPO_ROOT/rotate.py" "$REPO_ROOT/tray_app.py" \
 cp "$REPO_ROOT/assets/immich-flower.png" "$REPO_ROOT/assets/app-icon.png" \
    "$PKG_DIR/usr/share/immich-wallpaper/assets/"
 cp "$REPO_ROOT/assets/app-icon.png" "$PKG_DIR/usr/share/icons/hicolor/256x256/apps/immich-wallpaper.png"
+# Wayland matches the window to this entry by its name (the GTK app id).
+cp "$REPO_ROOT/packaging/io.github.mstewart14.ImmichWallpaper.desktop" "$PKG_DIR/usr/share/applications/"
 
 declare -A entry_points=([tray]=tray_app.py [config]=settings_window.py [rotate]=rotate.py)
 for name in "${!entry_points[@]}"; do

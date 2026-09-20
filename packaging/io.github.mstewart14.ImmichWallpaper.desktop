@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Immich Wallpaper Settings
+Comment=Choose which Immich photos rotate as your wallpaper
+Exec=immich-wallpaper-config
+Icon=immich-wallpaper
+Terminal=false
+Categories=Settings;
+StartupWMClass=io.github.mstewart14.ImmichWallpaper

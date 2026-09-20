@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
 APP_ID = "io.github.mstewart14.ImmichWallpaper"
+# Themed icon the packages install; desktops find the window by it.
+ICON_NAME = "immich-wallpaper"
 ICON_PATH = HERE / "assets" / "app-icon.png"
 
 THUMBNAIL_SIZE = 28
@@ -648,6 +650,9 @@ class SettingsWindow(Gtk.Window):
 
 def main() -> int:
     """Run the settings window as a single-instance GTK application."""
+    GLib.set_prgname(APP_ID)
+    GLib.set_application_name(TITLE)
+    Gtk.Window.set_default_icon_name(ICON_NAME)
     application = Gtk.Application(application_id=APP_ID)
 
     def on_activate(app: Gtk.Application) -> None:
