@@ -38,7 +38,7 @@ CONFIG = {
     "albums": [{"id": "a1", "name": "Trip"}],
     "people": [{"id": "p1", "name": "Ann"}],
 }
-THREE = {"ok": True, "per_monitor": True, "monitors": [
+THREE: dict = {"ok": True, "per_monitor": True, "monitors": [
     {"name": "HDMI-A-1", "x": 0, "y": 0, "width": 2560, "height": 1440,
      "primary": True},
     {"name": "DVI-I-1", "x": 2560, "y": 0, "width": 1280, "height": 1024,

@@ -8,7 +8,7 @@ import settings
 try:
     import tray_app
 except SystemExit:  # pystray / Pillow not installed
-    tray_app = None
+    tray_app = None  # type: ignore[assignment]
 
 
 @unittest.skipIf(tray_app is None, "pystray or Pillow not installed")

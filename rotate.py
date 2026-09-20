@@ -585,7 +585,8 @@ def _render_span(
 
     The monitors are laid side by side as a strip, filled with as many
     photos as fit without cropping any (at most `max_photos` in total, not
-    per screen), then each monitor takes its own slice. Returns ({monitor name: image}, the photos used).
+    per screen), then each monitor takes its own slice. Returns
+    ({monitor name: image}, the photos used).
     """
     strip = screens.strip_layout(monitors)
     known = _with_aspects(batch)
