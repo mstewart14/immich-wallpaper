@@ -1,6 +1,6 @@
 pkgbase = immich-wallpaper
 	pkgdesc = Rotate desktop wallpaper from a self-hosted Immich library, with a tray icon for status and controls
-	pkgver = 1.0.6
+	pkgver = 1.0.7
 	pkgrel = 1
 	url = https://github.com/mstewart14/immich-wallpaper
 	arch = any
@@ -15,7 +15,7 @@ pkgbase = immich-wallpaper
 	depends = xorg-xprop
 	optdepends = kdialog: save-a-copy dialog on KDE Plasma
 	optdepends = zenity: save-a-copy dialog on GTK-based desktops (e.g. XFCE)
-	source = immich-wallpaper-1.0.6.tar.gz::https://github.com/mstewart14/immich-wallpaper/archive/refs/tags/v1.0.6.tar.gz
-	sha256sums = a4c4a2e9e0f5fab26af96e489ad864e14f7e6beeea0d095ff8b2d42afa457bb4
+	source = immich-wallpaper-1.0.7.tar.gz::https://github.com/mstewart14/immich-wallpaper/archive/refs/tags/v1.0.7.tar.gz
+	sha256sums = bb7288baf1191b7a4a25480ff659a312e64831911f3dfddb717d1f56af85c63c
 
 pkgname = immich-wallpaper
