@@ -78,9 +78,9 @@ EXTRA_BATCH_PER_MONITOR = 6
 MAX_BATCH_SIZE = 30
 
 MULTI_MONITOR_MODES = ("same", "different", "span")
-# Most photos allowed on one screen, and across a spanned desktop.
+# Most photos the "most photos" setting can allow (on one screen, or across
+# a whole spanned picture).
 MAX_PHOTOS_PER_SCREEN_LIMIT = 6
-SPAN_MAX_PHOTOS = 6
 
 # Multi-monitor images don't try to keep clear of a taskbar: the desktop
 # only reports one work area for all screens, so there is nothing reliable
@@ -579,13 +579,13 @@ def _render_screen(
 
 def _render_span(
     config: dict, batch: list[dict], monitors: list[desktops.Monitor],
-    download, show_info: bool, show_date: bool,
+    download, show_info: bool, show_date: bool, max_photos: int,
 ) -> tuple[dict[str, Any], list[dict]]:
     """One mosaic across all `monitors`, sliced into one image per monitor.
 
     The monitors are laid side by side as a strip, filled with as many
-    photos as fit without cropping any, then each monitor takes its own
-    slice. Returns ({monitor name: image}, the photos used).
+    photos as fit without cropping any (at most `max_photos` in total, not
+    per screen), then each monitor takes its own slice. Returns ({monitor name: image}, the photos used).
     """
     strip = screens.strip_layout(monitors)
     known = _with_aspects(batch)
@@ -593,7 +593,7 @@ def _render_span(
         raise ValueError("no photos with known dimensions to span")
     placements = layout.plan_row(
         [aspect for _, aspect in known], strip.width, strip.height,
-        max_photos=SPAN_MAX_PHOTOS)
+        max_photos=max_photos)
     chosen = [known[place.index][0] for place in placements]
     canvas = compose.compose_row(
         [download(asset)[0] for asset in chosen], placements,
@@ -641,7 +641,8 @@ def build_multi_entry(
             shared) or "span" (one mosaic across all the monitors).
         per_monitor: Whether the desktop sets monitors individually. If
             not, the entry holds just its main image.
-        max_photos: Most photos on one screen (outside "span").
+        max_photos: Most photos on one screen, or in total across the
+            spanned picture in "span" mode.
 
     Returns:
         The entry. Its main `path` is the primary monitor's image, and
@@ -664,7 +665,8 @@ def build_multi_entry(
 
     if mode == "span" and several:
         slices, chosen = _render_span(
-            config, batch, monitors, download, show_info, show_date)
+            config, batch, monitors, download, show_info, show_date,
+            max_photos)
         remember(chosen)
         for name, canvas in slices.items():
             files[name] = _save_screen_image(

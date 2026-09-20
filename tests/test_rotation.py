@@ -262,6 +262,13 @@ class MultiMonitorBuilderTests(unittest.TestCase):
         self.assertGreater(sum(images["HDMI-A-1"].getpixel((3, 720))), 60)
         self.assertGreater(sum(images["DVI-I-1"].getpixel((1276, 512))), 60)
 
+    def test_span_never_uses_more_photos_than_the_limit(self):
+        for limit in (1, 2, 3):
+            with self.subTest(limit=limit):
+                entry, _, _ = self.build(
+                    [(1600, 2400)] * 6, [M1, M2], "span", max_photos=limit)
+                self.assertLessEqual(len(entry["assets"]), limit)
+
     def test_one_selected_monitor_gets_only_its_own_image(self):
         entry, images, _ = self.build([(3200, 1800)] * 2, [M2], "same")
         self.assertEqual(set(entry["images"]), {"DVI-I-1"})

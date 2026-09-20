@@ -395,9 +395,11 @@ def _xfce_apply(assignments: dict[str, Path | str]) -> bool:
     """
     all_set = True
     for image_property, image_path in assignments.items():
+        # --create so a monitor xfdesktop hasn't stored settings for yet
+        # (e.g. a second screen never configured in Desktop Settings) works.
         result = subprocess.run(
             ["xfconf-query", "-c", "xfce4-desktop", "-p", image_property,
-             "-s", str(image_path)],
+             "--create", "-t", "string", "-s", str(image_path)],
             capture_output=True, text=True,
         )
         if result.returncode != 0:
@@ -410,7 +412,7 @@ def _xfce_apply(assignments: dict[str, Path | str]) -> bool:
             image_property[:-len("last-image")] + "image-style")
         subprocess.run(
             ["xfconf-query", "-c", "xfce4-desktop", "-p", style_property,
-             "-s", "4"],
+             "--create", "-t", "int", "-s", "4"],
             capture_output=True, text=True,
         )
     subprocess.run(["xfdesktop", "--reload"], capture_output=True, text=True)
@@ -441,9 +443,23 @@ def set_monitor_wallpapers_xfce(images: Mapping[str, Path | str]) -> bool:
         return False
     assignments: dict[str, Path | str] = {}
     missing = []
+    connected = None
     for name, image_path in images.items():
         matches = [prop for prop in image_properties
                    if f"/monitor{name}/" in prop]
+        if not matches:
+            # xfdesktop only stores settings for a monitor once it has been
+            # configured, so a connected-but-new monitor has none. Create
+            # them (workspaces as seen on the other monitors).
+            if connected is None:
+                connected = {m.name for m in get_monitors_xrandr()}
+            if name in connected:
+                workspaces = sorted({
+                    m.group(0) for prop in image_properties
+                    if (m := re.search(r"workspace\d+", prop))
+                }) or ["workspace0"]
+                matches = [f"/backdrop/screen0/monitor{name}/{ws}/last-image"
+                           for ws in workspaces]
         if not matches:
             missing.append(name)
         for prop in matches:

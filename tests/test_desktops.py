@@ -164,9 +164,9 @@ class XfceSetterTests(unittest.TestCase):
 
     @staticmethod
     def image_sets(calls):
-        return {c[4]: c[6] for c in calls
+        return {c[4]: c[-1] for c in calls
                 if c[:4] == ["xfconf-query", "-c", "xfce4-desktop", "-p"]
-                and c[5] == "-s" and c[4].endswith("last-image")}
+                and c[-2] == "-s" and c[4].endswith("last-image")}
 
     def test_every_monitor_and_workspace_gets_the_image(self):
         ok, calls = self.run_setter(desktops.set_wallpaper_xfce, "/i/x.jpg")
@@ -209,6 +209,20 @@ class XfceSetterTests(unittest.TestCase):
         self.assertEqual(
             sets["/backdrop/screen0/monitorDVI-I-1/workspace0/last-image"],
             "/i/2.jpg")
+
+    def test_a_connected_monitor_without_settings_gets_them_created(self):
+        with mock.patch.object(desktops, "get_monitors_xrandr",
+                               return_value=[desktops.Monitor(
+                                   "NEW-1", 0, 0, 2560, 1440)]):
+            ok, calls = self.run_setter(
+                desktops.set_monitor_wallpapers_xfce, {"NEW-1": "/i/n.jpg"})
+        self.assertTrue(ok)
+        self.assertEqual(
+            self.image_sets(calls),
+            {f"/backdrop/screen0/monitorNEW-1/{ws}/last-image": "/i/n.jpg"
+             for ws in ("workspace0", "workspace1")})
+        self.assertTrue(all("--create" in c for c in calls
+                            if c[-2:-1] == ["-s"]))
 
     def test_an_unknown_monitor_is_reported_but_others_still_apply(self):
         ok, calls = self.run_setter(
