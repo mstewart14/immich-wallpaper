@@ -5,7 +5,7 @@
 # helper needed. Verified building/installing on Manjaro. If a package
 # name has changed since, `pacman -Ss <topic>` will find the current one.
 pkgname=immich-wallpaper
-pkgver=1.0.7
+pkgver=1.0.8
 pkgrel=1
 pkgdesc="Rotate desktop wallpaper from a self-hosted Immich library, with a tray icon for status and controls"
 arch=('any')
@@ -15,7 +15,7 @@ depends=('python' 'python-pillow' 'python-gobject' 'gtk3' 'libayatana-appindicat
 optdepends=('kdialog: save-a-copy dialog on KDE Plasma'
             'zenity: save-a-copy dialog on GTK-based desktops (e.g. XFCE)')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/mstewart14/immich-wallpaper/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('bb7288baf1191b7a4a25480ff659a312e64831911f3dfddb717d1f56af85c63c')
+sha256sums=('2dac340057039d93911c04acdf37e375df2468a9903e13095b2f1aa2729fdf50')
 
 package() {
   cd "$srcdir/$pkgname-$pkgver"
