@@ -8,6 +8,7 @@ synchronous so the tests are deterministic.
 import io
 import unittest
 import warnings
+from pathlib import Path
 from unittest import mock
 
 import settings
@@ -270,6 +271,22 @@ class SettingsPanelTests(unittest.TestCase):
                                side_effect=RuntimeError("boom")):
             panel._on_save(None)
         self.assertEqual(panel.save_status.get_text(), "boom")
+
+    # ---- header -------------------------------------------------------------
+    def test_the_logo_is_shown_beside_the_title(self):
+        panel = self.make()
+        self.assertIsInstance(panel.logo, Gtk.Image)
+        pixbuf = panel.logo.get_pixbuf()
+        self.assertLessEqual(max(pixbuf.get_width(), pixbuf.get_height()),
+                             settings_window.LOGO_SIZE)
+        self.assertGreater(pixbuf.get_width(), 8)
+
+    def test_a_missing_logo_file_is_tolerated(self):
+        with mock.patch.object(settings_window, "ICON_PATH",
+                               Path("/nonexistent/logo.png")):
+            panel = self.make()
+        self.assertIsNone(panel.logo)
+        self.assertEqual(panel.notebook.get_n_pages(), 4)  # still fully built
 
     # ---- rendering ----------------------------------------------------------
     def test_every_page_renders_offscreen(self):

@@ -40,6 +40,9 @@ APP_ID = "io.github.mstewart14.ImmichWallpaper"
 ICON_PATH = HERE / "assets" / "app-icon.png"
 
 THUMBNAIL_SIZE = 28
+LOGO_SIZE = 48
+TITLE = "Immich Wallpaper Rotator"
+SUBTITLE = "Configure where photos come from and how the rotation behaves."
 PERMISSIONS_HELP = (
     "In Immich, go to Account Settings → API Keys → New API Key, "
     "give it a name like wallpaper-rotator, and grant only these "
@@ -215,7 +218,33 @@ class SettingsPanel(Gtk.Box):
         self.reload_monitors()
 
     # ---- building the UI -----------------------------------------------
+    def _header(self) -> Gtk.Box:
+        """The logo beside the title, as on the web page."""
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        for side, margin in (("top", 12), ("bottom", 4), ("start", 14),
+                             ("end", 14)):
+            getattr(header, f"set_margin_{side}")(margin)
+        self.logo: Gtk.Image | None = None
+        try:
+            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                str(ICON_PATH), LOGO_SIZE, LOGO_SIZE, True)
+        except GLib.Error:
+            pixbuf = None  # the logo is decoration; the title still shows
+        if pixbuf is not None:
+            self.logo = Gtk.Image.new_from_pixbuf(pixbuf)
+            header.pack_start(self.logo, False, False, 0)
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        title = Gtk.Label()
+        title.set_xalign(0)
+        title.set_markup('<span size="x-large" weight="bold">'
+                         f"{GLib.markup_escape_text(TITLE)}</span>")
+        titles.pack_start(title, False, False, 0)
+        titles.pack_start(_label(SUBTITLE), False, False, 0)
+        header.pack_start(titles, True, True, 0)
+        return header
+
     def _build(self) -> None:
+        self.pack_start(self._header(), False, False, 0)
         self.notebook = Gtk.Notebook()
         self.notebook.set_vexpand(True)
         for title, page in (("Server", self._server_page()),
